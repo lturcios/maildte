@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MailDTE Collector · Panel</title>
+    <script>
+      // Aplica el tema antes del primer render de React para evitar el
+      // parpadeo de tema incorrecto (FOUC). Debe leer la misma clave que
+      // usa el store de UI persistido (src/stores/ui-store.ts).
+      (function () {
+        try {
+          var raw = localStorage.getItem('maildte-ui');
+          var theme = raw ? JSON.parse(raw).state.theme : 'dark';
+          if (theme === 'dark') {
+            document.documentElement.classList.add('dark');
+          }
+        } catch (_e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

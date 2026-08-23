@@ -1,0 +1,382 @@
+# Arquitectura Técnica — MailDTE Collector
+**v1.0 — Base de diseño para implementación con Claude Code**
+
+---
+
+## 1. Stack tecnológico (fijo, no negociable)
+
+| Capa | Tecnología |
+|---|---|
+| Runtime | Node.js 20 LTS |
+| Framework backend | NestJS 10 + TypeScript strict |
+| ORM / BD | Prisma + PostgreSQL 16 |
+| Colas y scheduler | BullMQ + Redis 7 |
+| Cliente IMAP | `imapflow` |
+| Parseo MIME | `mailparser` |
+| Logs | `pino` (JSON estructurado) |
+| Validación | `class-validator` + `class-transformer` (DTOs NestJS) |
+| Gestor de paquetes | pnpm (exclusivamente) |
+| Despliegue | Docker Compose + Nginx en VPS |
+| Panel web (fase 2) | React 19 + Vite + Tailwind + shadcn/ui + Zustand |
+
+## 2. Diagrama de componentes
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │              VPS (Docker)               │
+                    │                                         │
+ Proveedores IMAP   │  ┌──────────┐      ┌────────────────┐   │
+ (Gmail, M365,   ◄──┼──┤  Worker  │◄─────┤   Scheduler    │   │
+  cPanel...)        │  │  BullMQ  │      │ (jobs repeat.) │   │
+                    │  └────┬─────┘      └───────┬────────┘   │
+                    │       │                    │            │
+                    │       ▼                    ▼            │
+                    │  ┌──────────┐        ┌─────────┐        │
+                    │  │ Storage  │        │  Redis  │        │
+                    │  │ (volumen)│        └─────────┘        │
+                    │  └──────────┘                           │
+                    │       ▲                                 │
+                    │       │            ┌──────────────┐     │
+  Cliente API /  ◄──┼── Nginx ──────────►│  API NestJS  │     │
+  Panel (fase 2)    │                    └──────┬───────┘     │
+                    │                           ▼             │
+                    │                    ┌──────────────┐     │
+                    │                    │ PostgreSQL16 │     │
+                    │                    └──────────────┘     │
+                    └─────────────────────────────────────────┘
+```
+
+API y Worker corren en el **mismo repositorio** (monorepo simple NestJS) pero como **procesos separados** (`main.ts` para API, `worker.ts` para consumidor BullMQ), permitiendo escalar workers independientemente.
+
+## 3. Estructura del proyecto
+
+```
+maildte/
+├── prisma/
+│   ├── schema.prisma
+│   └── migrations/
+├── src/
+│   ├── main.ts                      # bootstrap API HTTP
+│   ├── worker.ts                    # bootstrap proceso worker BullMQ
+│   ├── app.module.ts
+│   ├── config/
+│   │   ├── config.module.ts         # @nestjs/config + validación Joi de env
+│   │   └── env.validation.ts
+│   ├── common/
+│   │   ├── guards/api-key.guard.ts
+│   │   ├── filters/http-exception.filter.ts
+│   │   ├── crypto/aes.service.ts    # AES-256-GCM encrypt/decrypt
+│   │   └── utils/sanitize-filename.ts
+│   ├── prisma/
+│   │   └── prisma.service.ts
+│   ├── accounts/                    # F-01 gestión de cuentas
+│   │   ├── accounts.module.ts
+│   │   ├── accounts.controller.ts
+│   │   ├── accounts.service.ts
+│   │   └── dto/
+│   ├── sync/                        # F-02 orquestación
+│   │   ├── sync.module.ts
+│   │   ├── sync.scheduler.ts        # registra jobs repetibles por cuenta
+│   │   ├── sync.processor.ts        # consumidor BullMQ (proceso worker)
+│   │   ├── sync.service.ts          # lógica de sincronización
+│   │   └── imap/
+│   │       ├── imap-client.factory.ts
+│   │       └── message-parser.ts    # mailparser → EmailMeta + adjuntos
+│   ├── storage/                     # F-04 filesystem
+│   │   ├── storage.module.ts
+│   │   └── storage.service.ts       # rutas cuenta/mes, tmp+rename, hash
+│   ├── emails/                      # F-05 consulta y auditoría
+│   │   ├── emails.module.ts
+│   │   ├── emails.controller.ts
+│   │   ├── emails.service.ts
+│   │   └── dto/
+│   └── stats/
+│       ├── stats.module.ts
+│       └── stats.controller.ts
+├── test/
+├── docker-compose.yml
+├── Dockerfile
+├── .env.example
+├── CLAUDE.md
+└── package.json
+```
+
+## 4. Esquema de base de datos (Prisma)
+
+```prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AccountStatus {
+  ACTIVA
+  INACTIVA
+  ERROR_AUTH
+}
+
+enum EmailStatus {
+  PROCESADO
+  SIN_ADJUNTOS
+  ERROR
+}
+
+enum AttachmentType {
+  JSON
+  PDF
+}
+
+enum SyncStatus {
+  EJECUTANDO
+  COMPLETADO
+  COMPLETADO_CON_ERRORES
+  ERROR
+}
+
+model EmailAccount {
+  id            String        @id @default(uuid())
+  alias         String                          // "Compras Casa Matriz"
+  email         String        @unique           // compras@ltsoft.us
+  folderName    String                          // compras_ltsoft_us (normalizado)
+  imapHost      String
+  imapPort      Int           @default(993)
+  imapSecure    Boolean       @default(true)
+  imapUser      String
+  imapPassEnc   String                          // AES-256-GCM (iv:tag:cipher, base64)
+  mailbox       String        @default("INBOX")
+  syncInterval  Int           @default(300)     // segundos
+  syncFromDate  DateTime      @default(now())
+  lastUid       Int           @default(0)
+  uidValidity   BigInt?                         // detección de reset del buzón
+  lastSyncAt    DateTime?
+  lastError     String?
+  status        AccountStatus @default(ACTIVA)
+  deletedAt     DateTime?                       // soft delete
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  emails        ProcessedEmail[]
+  syncLogs      SyncLog[]
+
+  @@map("email_accounts")
+}
+
+model ProcessedEmail {
+  id              String       @id @default(uuid())
+  accountId       String
+  account         EmailAccount @relation(fields: [accountId], references: [id])
+  messageId       String                        // header Message-ID
+  uid             Int                           // UID IMAP
+  subject         String       @default("")
+  senderName      String       @default("")
+  senderEmail     String
+  recipients      String[]                      // direcciones To
+  receivedAt      DateTime                      // header Date (UTC)
+  processedAt     DateTime     @default(now())
+  monthFolder     String                        // "2026-08" (TZ El Salvador)
+  attachmentCount Int          @default(0)
+  status          EmailStatus
+  errorDetail     String?
+
+  attachments     Attachment[]
+
+  @@unique([accountId, messageId])              // idempotencia
+  @@index([accountId, receivedAt])
+  @@index([senderEmail])
+  @@index([status])
+  @@map("processed_emails")
+}
+
+model Attachment {
+  id            String         @id @default(uuid())
+  emailId       String
+  email         ProcessedEmail @relation(fields: [emailId], references: [id])
+  originalName  String
+  storedName    String
+  relativePath  String                          // compras_ltsoft_us/2026-08/json/x.json
+  fileType      AttachmentType
+  mimeType      String
+  sizeBytes     Int
+  sha256        String
+  createdAt     DateTime       @default(now())
+
+  @@index([emailId])
+  @@index([sha256])
+  @@map("attachments")
+}
+
+model SyncLog {
+  id              String       @id @default(uuid())
+  accountId       String
+  account         EmailAccount @relation(fields: [accountId], references: [id])
+  startedAt       DateTime     @default(now())
+  finishedAt      DateTime?
+  emailsFound     Int          @default(0)
+  emailsProcessed Int          @default(0)
+  emailsSkipped   Int          @default(0)     // duplicados
+  filesDownloaded Int          @default(0)
+  status          SyncStatus   @default(EJECUTANDO)
+  errorDetail     String?
+  trigger         String       @default("scheduler") // scheduler | manual
+
+  @@index([accountId, startedAt])
+  @@map("sync_logs")
+}
+```
+
+### Notas de diseño de BD
+- `@@unique([accountId, messageId])` es la garantía dura de idempotencia; cualquier intento de doble inserción falla a nivel de constraint.
+- `uidValidity`: si el servidor IMAP cambia el `UIDVALIDITY` del buzón, los UID anteriores dejan de ser válidos → el sistema resetea `lastUid = 0` y confía en la idempotencia por `messageId` para no duplicar.
+- `monthFolder` se persiste (no se recalcula) para que la BD y el disco nunca diverjan aunque cambie la lógica de TZ.
+- Fechas siempre en UTC en BD; conversión a `America/El_Salvador` solo al calcular `monthFolder` y al presentar en API.
+
+## 5. Flujo detallado de sincronización
+
+```
+1. Scheduler (proceso API) registra job repetible "sync:{accountId}"
+   con every = syncInterval por cada cuenta ACTIVA.
+2. Worker recibe el job:
+   a. SET NX lock redis "lock:sync:{accountId}" TTL 10 min → si existe, abortar.
+   b. Crear SyncLog (EJECUTANDO).
+   c. ImapFlow.connect() con credenciales descifradas.
+   d. mailboxOpen(mailbox) → comparar uidValidity; si cambió: lastUid = 0.
+   e. fetch("{lastUid+1}:*", { uid: true, envelope: true, source: true })
+   f. Por cada mensaje (secuencial, para orden y control de memoria):
+      i.   Parsear con mailparser (desde source).
+      ii.  ¿Existe (accountId, messageId)? → skip, emailsSkipped++.
+      iii. Filtrar adjuntos: /\.(json|pdf)$/i sobre filename
+           OR mimeType ∈ {application/json, application/pdf}.
+      iv.  Sin adjuntos válidos → insertar ProcessedEmail(SIN_ADJUNTOS).
+      v.   Con adjuntos:
+           - Calcular monthFolder con receivedAt en TZ America/El_Salvador.
+           - Por adjunto: sanitizar nombre → sha256 → resolver colisión
+             → escribir a .tmp → fsync → rename.
+           - Transacción Prisma: ProcessedEmail + Attachments.
+           - Si falla la transacción → borrar archivos escritos de este
+             correo (rollback en disco) → registrar ERROR.
+      vi.  Actualizar account.lastUid = max(lastUid, uid) tras cada correo
+           exitoso (no al final del lote: una caída no repite trabajo).
+   g. Cerrar conexión, SyncLog → COMPLETADO / COMPLETADO_CON_ERRORES.
+   h. DEL lock.
+3. Fallo de conexión/global → reintentos BullMQ: attempts 3,
+   backoff exponencial base 30s. Agotados → SyncLog ERROR,
+   account.lastError. Si el error es de autenticación 3 veces
+   consecutivas → account.status = ERROR_AUTH (se excluye del scheduler
+   hasta actualizar credenciales).
+```
+
+## 6. Reglas de almacenamiento
+
+```
+STORAGE_ROOT (env, default /data/storage)
+└── {folderName}/                    ej. compras_ltsoft_us/
+    └── {YYYY-MM}/                   ej. 2026-08/
+        ├── json/
+        └── pdf/
+```
+
+1. **Normalización de cuenta**: lowercase, `@` y `.` → `_`, solo `[a-z0-9_-]`.
+2. **Sanitización de nombre**: remover `/ \ : * ? " < > |` y caracteres de control; colapsar espacios; máx. 180 chars conservando extensión.
+3. **Colisiones**: mismo nombre + mismo sha256 → reutilizar archivo (registrar Attachment apuntando a ruta existente). Mismo nombre + distinto sha256 → `factura_a1b2c3d4.pdf`.
+4. **Escritura atómica**: `archivo.pdf.tmp` → `fsync` → `rename`. Al iniciar cada sync se eliminan `*.tmp` huérfanos de la cuenta.
+5. **Permisos**: el volumen se monta con usuario no-root del contenedor (uid 1000).
+
+## 7. API REST (prefijo `/api/v1`, auth `X-Api-Key`)
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/accounts` | Crear cuenta (valida IMAP antes de persistir) |
+| GET | `/accounts` | Listar cuentas (sin credenciales) |
+| GET | `/accounts/:id` | Detalle + últimas sincronizaciones |
+| PATCH | `/accounts/:id` | Actualizar (si cambia credencial → revalidar IMAP) |
+| DELETE | `/accounts/:id` | Soft delete |
+| POST | `/accounts/:id/sync` | Sincronización manual inmediata |
+| POST | `/accounts/:id/test` | Probar conexión IMAP |
+| GET | `/emails` | Listado con filtros: `accountId, from, to, sender, status, hasAttachments, page, limit` |
+| GET | `/emails/:id` | Detalle con adjuntos |
+| GET | `/attachments/:id/download` | Stream del archivo |
+| GET | `/sync-logs` | Filtros: `accountId, status, page` |
+| GET | `/stats/summary` | Totales por cuenta/mes: correos, archivos, bytes |
+| GET | `/health` | Estado API, BD, Redis |
+
+### Convenciones de respuesta
+```json
+// Éxito listado
+{ "data": [...], "meta": { "page": 1, "limit": 50, "total": 1240 } }
+// Error
+{ "statusCode": 422, "error": "IMAP_AUTH_FAILED",
+  "message": "Autenticación rechazada por imap.gmail.com" }
+```
+
+## 8. Seguridad
+
+- **Credenciales**: AES-256-GCM con clave de 32 bytes en `ENCRYPTION_KEY` (env). Formato almacenado: `base64(iv):base64(authTag):base64(cipher)`. La clave nunca se persiste en BD ni en logs.
+- **IMAP**: TLS obligatorio (`secure: true` o STARTTLS); rechazar certificados inválidos (sin `rejectUnauthorized: false`).
+- **Gmail / Microsoft 365**: documentar uso de app passwords (requiere 2FA activado). OAuth2 en fase 2.
+- **Path traversal**: toda ruta de descarga se resuelve con `path.resolve` y se verifica `startsWith(STORAGE_ROOT)`.
+- **API Key**: comparación en tiempo constante (`crypto.timingSafeEqual`).
+- **Rate limit**: `@nestjs/throttler`, 100 req/min por key.
+
+## 9. Variables de entorno (`.env.example`)
+
+```env
+NODE_ENV=production
+PORT=3000
+DATABASE_URL=postgresql://maildte:secret@postgres:5432/maildte
+REDIS_URL=redis://redis:6379
+ENCRYPTION_KEY=            # 32 bytes hex (openssl rand -hex 32)
+API_KEY=                   # openssl rand -hex 24
+STORAGE_ROOT=/data/storage
+DEFAULT_SYNC_INTERVAL=300
+TZ_FOLDER=America/El_Salvador
+LOG_LEVEL=info
+MAX_ATTACHMENT_MB=25
+```
+
+## 10. Docker Compose (esqueleto)
+
+```yaml
+services:
+  api:
+    build: .
+    command: node dist/main.js
+    env_file: .env
+    depends_on: [postgres, redis]
+    volumes: ["storage:/data/storage"]
+  worker:
+    build: .
+    command: node dist/worker.js
+    env_file: .env
+    depends_on: [postgres, redis]
+    volumes: ["storage:/data/storage"]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: maildte
+      POSTGRES_USER: maildte
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+  redis:
+    image: redis:7-alpine
+    volumes: ["redisdata:/data"]
+volumes:
+  storage:
+  pgdata:
+  redisdata:
+```
+
+Nginx (host) hace proxy a `api:3000` con TLS (Certbot), como el resto del ecosistema LTSOFT.
+
+## 11. Decisiones de arquitectura (ADR resumido)
+
+| # | Decisión | Alternativa descartada | Razón |
+|---|---|---|---|
+| ADR-1 | IMAP polling incremental por UID | IMAP IDLE (push) | Simplicidad y robustez multi-proveedor; IDLE requiere conexiones persistentes frágiles. Latencia de 5 min es aceptable. Evaluable en fase 2. |
+| ADR-2 | Filesystem + rutas en BD | Archivos como BLOB en PostgreSQL | Los DTE se consultan también por carpeta directamente (contabilidad); respaldo con rsync trivial; BD liviana. |
+| ADR-3 | `imapflow` | `node-imap` | API moderna con promesas, mantenimiento activo, manejo nativo de UIDVALIDITY. |
+| ADR-4 | Procesamiento secuencial por cuenta, paralelo entre cuentas | Paralelo total | Orden garantizado de lastUid y memoria acotada; el paralelismo entre cuentas ya da el throughput necesario. |
+| ADR-5 | monthFolder por fecha de **recepción** | Por fecha de procesamiento | Alineado a períodos fiscales: un correo de julio procesado el 2 de agosto pertenece a julio. |

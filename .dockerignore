@@ -1,0 +1,22 @@
+node_modules
+dist
+coverage
+data
+.git
+.gitignore
+*.md
+
+# Secretos: jamás deben terminar en una capa de la imagen
+.env
+.env.*
+!.env.example
+
+# Paquete independiente (RF-07), no forma parte de la imagen del servidor
+cli/
+
+# Scripts administrativos de un solo uso: no se ejecutan dentro del contenedor
+# (se corren manualmente con las credenciales del rol owner, ver RUNBOOK.md)
+scripts/
+
+.vscode
+.idea
