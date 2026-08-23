@@ -13,6 +13,8 @@
  * como string en las respuestas JSON — por eso acá es `string | null`.
  */
 
+import type { UserRole } from '@/types/auth';
+
 export type AccountStatus = 'ACTIVA' | 'INACTIVA' | 'ERROR_AUTH';
 export type EmailStatus = 'PROCESADO' | 'SIN_ADJUNTOS' | 'ERROR';
 export type SyncStatus = 'EJECUTANDO' | 'COMPLETADO' | 'COMPLETADO_CON_ERRORES' | 'ERROR';
@@ -175,4 +177,71 @@ export interface ListSyncLogsQuery {
   status?: SyncStatus;
   page?: number;
   limit?: number;
+}
+
+/**
+ * Gestión de tenants (multi-tenancy), exclusiva de SUPERADMIN.
+ * Fuentes: src/admin/admin.controller.ts, admin.service.ts, dto/*.ts.
+ *
+ * Nota: `maxStorageBytes` es `BigInt` en Prisma (mismo caso que
+ * `uidValidity` en EmailAccount, arriba). El backend lo serializa como
+ * string vía `BigInt.prototype.toJSON` (src/common/bigint-json.ts) — por
+ * eso acá es `string`, no `number`.
+ */
+export type AdminTenantStatus = 'ACTIVO' | 'SUSPENDIDO';
+
+export interface AdminTenant {
+  id: string;
+  name: string;
+  slug: string;
+  status: AdminTenantStatus;
+  maxAccounts: number;
+  maxStorageBytes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Body de POST /admin/tenants. `slug` es inmutable tras la creación. */
+export interface CreateTenantInput {
+  name: string;
+  slug: string;
+  maxAccounts?: number;
+  maxStorageBytes?: number;
+}
+
+/** Body de PATCH /admin/tenants/:id. Sin `slug`: es inmutable. */
+export interface UpdateTenantInput {
+  name?: string;
+  maxAccounts?: number;
+  maxStorageBytes?: number;
+}
+
+/** Respuesta de GET /admin/tenants/:id/usage. */
+export interface TenantUsage {
+  accounts: number;
+  emailsByStatus: { status: string; count: number }[];
+  totalFiles: number;
+  totalBytes: number;
+  recentErrors: {
+    id: string;
+    accountId: string;
+    startedAt: string;
+    errorDetail: string | null;
+  }[];
+}
+
+/** Body de POST /admin/tenants/:id/users. Da de alta un ADMIN del tenant (acción repetible). */
+export interface CreateTenantAdminInput {
+  email: string;
+  name: string;
+  password: string;
+}
+
+/** Respuesta de POST /admin/tenants/:id/users (SAFE_USER_SELECT del backend). */
+export interface TenantAdminUser {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  createdAt: string;
 }

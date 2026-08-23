@@ -1,6 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { AccountStatus, EmailStatus, SyncStatus } from '@/types/domain';
+import type { AccountStatus, AdminTenantStatus, EmailStatus, SyncStatus } from '@/types/domain';
 
 /**
  * Insignias de estado por dominio. Reusan exclusivamente las variables de
@@ -41,6 +41,27 @@ export function AccountStatusBadge({
   return (
     <Badge variant="outline" className={cn(BADGE_BASE, 'text-muted-foreground')}>
       Inactiva
+    </Badge>
+  );
+}
+
+export function TenantStatusBadge({ status }: { status: AdminTenantStatus }) {
+  if (status === 'ACTIVO') {
+    return (
+      <Badge
+        variant="outline"
+        className={cn(BADGE_BASE, 'border-chart-4/40 bg-chart-4/15 text-chart-4')}
+      >
+        Activo
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className={cn(BADGE_BASE, 'border-destructive/40 bg-destructive/15 text-destructive')}
+    >
+      Suspendido
     </Badge>
   );
 }

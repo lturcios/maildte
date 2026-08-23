@@ -1,6 +1,14 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router';
-import { FileStack, LayoutDashboard, MailSearch, Moon, ScrollText, Sun } from 'lucide-react';
+import {
+  Building2,
+  FileStack,
+  LayoutDashboard,
+  MailSearch,
+  Moon,
+  ScrollText,
+  Sun,
+} from 'lucide-react';
 
 import { apiPost } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
@@ -23,6 +31,14 @@ const NAV_ITEMS = [
   { to: '/correos', label: 'Correos', icon: MailSearch, end: false },
   { to: '/logs', label: 'Logs', icon: ScrollText, end: false },
 ] as const;
+
+/** Solo visible para SUPERADMIN; la ruta también está protegida por SuperadminRoute. */
+const SUPERADMIN_NAV_ITEM = {
+  to: '/organizaciones',
+  label: 'Organizaciones',
+  icon: Building2,
+  end: false,
+} as const;
 
 function initialsFrom(name: string, email: string): string {
   const source = name.trim() || email;
@@ -69,24 +85,26 @@ export function AppLayout() {
           <span className="text-xs text-muted-foreground">Collector</span>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-3">
-          {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                    : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground',
-                )
-              }
-            >
-              <Icon className="size-4" aria-hidden="true" />
-              {label}
-            </NavLink>
-          ))}
+          {[...NAV_ITEMS, ...(user?.role === 'SUPERADMIN' ? [SUPERADMIN_NAV_ITEM] : [])].map(
+            ({ to, label, icon: Icon, end }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={end}
+                className={({ isActive }) =>
+                  cn(
+                    'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                      : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground',
+                  )
+                }
+              >
+                <Icon className="size-4" aria-hidden="true" />
+                {label}
+              </NavLink>
+            ),
+          )}
         </nav>
       </aside>
 
