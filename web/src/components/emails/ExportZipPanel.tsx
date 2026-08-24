@@ -47,7 +47,11 @@ function buildScope(accountId: string, month: string, from: string, to: string):
  * forma de saber con certeza si hay algo para descargar en el rango elegido.
  */
 export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipPanelProps) {
-  const [month, setMonth] = useState('');
+  // <input type="month"> no lo soporta Firefox (cae a texto libre sin validar):
+  // se usa type="date" (sí soportado en todos los navegadores, mismo patrón que
+  // el resto de la app) y se recorta a "YYYY-MM"; el día elegido no importa.
+  const [monthPickerDate, setMonthPickerDate] = useState('');
+  const month = monthPickerDate.slice(0, 7);
   const [meta, setMeta] = useState<ExportManifestPage['meta'] | null>(null);
   const [loadingCount, setLoadingCount] = useState(true);
   const [downloading, setDownloading] = useState(false);
@@ -103,15 +107,15 @@ export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipP
         <Label htmlFor="exportMonth">Mes completo (atajo)</Label>
         <Input
           id="exportMonth"
-          type="month"
-          value={month}
-          onChange={(event) => setMonth(event.target.value)}
+          type="date"
+          value={monthPickerDate}
+          onChange={(event) => setMonthPickerDate(event.target.value)}
         />
       </div>
 
       <p className="max-w-sm text-xs text-muted-foreground">
         {month
-          ? 'Se descargan todos los adjuntos de ese mes.'
+          ? `Se descargan todos los adjuntos de ${month} (el día elegido no importa, solo el mes).`
           : 'Usa "Desde" / "Hasta" de los filtros de arriba (fecha en que se archivó el adjunto, no la de recepción del correo). Sin ninguno de los dos, descarga todo el histórico de la cuenta.'}
       </p>
 
