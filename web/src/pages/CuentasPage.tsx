@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
+import { CalendarClockIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { apiDelete, apiPost, ApiError } from '@/lib/api-client';
@@ -8,6 +8,7 @@ import { useAccountsStore } from '@/stores/accounts-store';
 import { useAccounts } from '@/hooks/useAccounts';
 import type { SafeAccount, TriggerSyncResult } from '@/types/domain';
 import { AccountFormDialog } from '@/components/accounts/AccountFormDialog';
+import { ResyncDialog } from '@/components/accounts/ResyncDialog';
 import { AccountStatusBadge } from '@/components/common/StatusBadges';
 import {
   AlertDialog,
@@ -39,6 +40,7 @@ export function CuentasPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SafeAccount | null>(null);
   const [deletingAccount, setDeletingAccount] = useState<SafeAccount | null>(null);
+  const [resyncingAccount, setResyncingAccount] = useState<SafeAccount | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
 
@@ -175,6 +177,21 @@ export function CuentasPage() {
                         type="button"
                         variant="ghost"
                         size="icon"
+                        title={
+                          account.status !== 'ACTIVA'
+                            ? `La cuenta está ${account.status.toLowerCase()} y no puede re-sincronizarse`
+                            : 'Re-sincronizar desde fecha'
+                        }
+                        disabled={account.status !== 'ACTIVA'}
+                        onClick={() => setResyncingAccount(account)}
+                      >
+                        <CalendarClockIcon className="size-4" aria-hidden="true" />
+                        <span className="sr-only">Re-sincronizar desde fecha</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
                         title="Editar"
                         onClick={() => openEditDialog(account)}
                       >
@@ -205,6 +222,15 @@ export function CuentasPage() {
         open={formOpen}
         onOpenChange={setFormOpen}
         onSaved={handleSaved}
+      />
+
+      <ResyncDialog
+        account={resyncingAccount}
+        onOpenChange={(open) => {
+          if (!open) {
+            setResyncingAccount(null);
+          }
+        }}
       />
 
       <AlertDialog

@@ -45,9 +45,8 @@ export interface SafeAccount {
 }
 
 /**
- * Body de POST /accounts. `syncFromDate` NO es un campo aceptable acá: el
- * backend lo fija a `now()` en la creación y no se expone en
- * CreateAccountDto/UpdateAccountDto (desvío respecto al brief original).
+ * Body de POST /accounts. `syncFromDate` es opcional: si se omite, el
+ * backend lo fija a `now()` en la creación (RF-02.2).
  */
 export interface CreateAccountInput {
   alias: string;
@@ -59,6 +58,18 @@ export interface CreateAccountInput {
   imapPassword: string;
   mailbox?: string;
   syncInterval?: number;
+  syncFromDate?: string;
+}
+
+/**
+ * Body de POST /accounts/:id/resync. Cambia el punto de partida de la cuenta
+ * y fuerza que el próximo sync recorra el buzón de nuevo desde esa fecha
+ * (ver AccountsService.resyncFrom) — a diferencia de `syncFromDate` en
+ * CreateAccountInput, que solo aplica en la primera sincronización, esto sí
+ * tiene efecto sobre una cuenta que ya sincronizó antes.
+ */
+export interface ResyncAccountInput {
+  syncFromDate: string;
 }
 
 /** Body de PATCH /accounts/:id. `status` solo admite ACTIVA/INACTIVA (ERROR_AUTH es auto-asignado). */

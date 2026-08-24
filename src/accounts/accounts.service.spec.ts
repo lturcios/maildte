@@ -151,6 +151,24 @@ describe('AccountsService', () => {
       expect(callArg.data.folderName).toBe('compras_ltsoft_us');
     });
 
+    it('pasa syncFromDate al create cuando el DTO lo incluye', async () => {
+      prismaMock.emailAccount.create.mockResolvedValue({ id: 'acc-1' });
+
+      await service.create({ ...baseDto, syncFromDate: '2026-01-15T00:00:00Z' }, TENANT_CTX);
+
+      const callArg = prismaMock.emailAccount.create.mock.calls[0][0];
+      expect(callArg.data.syncFromDate).toEqual(new Date('2026-01-15T00:00:00Z'));
+    });
+
+    it('no incluye syncFromDate en el create si el DTO lo omite (Prisma aplica el default now())', async () => {
+      prismaMock.emailAccount.create.mockResolvedValue({ id: 'acc-1' });
+
+      await service.create(baseDto, TENANT_CTX);
+
+      const callArg = prismaMock.emailAccount.create.mock.calls[0][0];
+      expect(callArg.data).not.toHaveProperty('syncFromDate');
+    });
+
     it('calcula folderName normalizado solo con [a-z0-9_-] para correos con acentos', async () => {
       prismaMock.emailAccount.create.mockResolvedValue({ id: 'acc-1' });
 
@@ -428,6 +446,44 @@ describe('AccountsService', () => {
       await expect(service.triggerManualSync(TENANT_CTX, 'acc-x')).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  describe('resyncFrom', () => {
+    it('actualiza syncFromDate, resetea lastSyncAt a null y encola el sync', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue({ id: 'acc-1', status: 'ACTIVA' });
+      prismaMock.emailAccount.update.mockResolvedValue({ id: 'acc-1' });
+
+      const result = await service.resyncFrom(TENANT_CTX, 'acc-1', {
+        syncFromDate: '2026-01-01T00:00:00Z',
+      });
+
+      expect(prismaMock.emailAccount.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'acc-1' },
+          data: { syncFromDate: new Date('2026-01-01T00:00:00Z'), lastSyncAt: null },
+        }),
+      );
+      expect(scheduler.enqueueManual).toHaveBeenCalledWith(TENANT_ID, 'acc-1');
+      expect(result).toEqual({ enqueued: true });
+    });
+
+    it('retorna 422 si la cuenta no está ACTIVA y no toca nada', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue({ id: 'acc-1', status: 'ERROR_AUTH' });
+
+      await expect(
+        service.resyncFrom(TENANT_CTX, 'acc-1', { syncFromDate: '2026-01-01T00:00:00Z' }),
+      ).rejects.toMatchObject({ status: 422 });
+      expect(prismaMock.emailAccount.update).not.toHaveBeenCalled();
+      expect(scheduler.enqueueManual).not.toHaveBeenCalled();
+    });
+
+    it('lanza NotFoundException si la cuenta no existe o es de otro tenant', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.resyncFrom(TENANT_CTX, 'acc-x', { syncFromDate: '2026-01-01T00:00:00Z' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 

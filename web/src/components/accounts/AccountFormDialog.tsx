@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react';
 import { toast } from 'sonner';
 
 import { apiPatch, apiPost, ApiError } from '@/lib/api-client';
+import { todayUtcDate } from '@/lib/format';
 import type {
   CreateAccountInput,
   SafeAccount,
@@ -38,6 +39,8 @@ interface FormState {
   imapPassword: string;
   mailbox: string;
   syncInterval: string;
+  /** Solo aplica en alta (RF-02.2): editarla después no tiene efecto, por eso no está en modo edición. */
+  syncFromDate: string;
 }
 
 function emptyForm(): FormState {
@@ -51,6 +54,7 @@ function emptyForm(): FormState {
     imapPassword: '',
     mailbox: 'INBOX',
     syncInterval: '300',
+    syncFromDate: '',
   };
 }
 
@@ -65,6 +69,7 @@ function formFromAccount(account: SafeAccount): FormState {
     imapPassword: '',
     mailbox: account.mailbox,
     syncInterval: String(account.syncInterval),
+    syncFromDate: '',
   };
 }
 
@@ -183,6 +188,9 @@ export function AccountFormDialog({
           imapPassword: form.imapPassword,
           ...(form.mailbox.trim() !== '' ? { mailbox: form.mailbox.trim() } : {}),
           ...(syncIntervalNumber !== undefined ? { syncInterval: syncIntervalNumber } : {}),
+          ...(form.syncFromDate !== ''
+            ? { syncFromDate: new Date(`${form.syncFromDate}T00:00:00Z`).toISOString() }
+            : {}),
         };
         const response = await apiPost<{ data: SafeAccount }>('/accounts', payload);
         onSaved(response.data);
@@ -318,6 +326,22 @@ export function AccountFormDialog({
               />
             </div>
           </div>
+
+          {!isEditMode && (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="syncFromDate">Sincronizar desde (opcional)</Label>
+              <Input
+                id="syncFromDate"
+                type="date"
+                max={todayUtcDate()}
+                value={form.syncFromDate}
+                onChange={(event) => update('syncFromDate', event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Solo aplica a la primera sincronización. Si se deja vacío, arranca desde ahora.
+              </p>
+            </div>
+          )}
 
           <DialogFooter className="items-center sm:justify-between">
             {isEditMode ? (

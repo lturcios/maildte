@@ -13,6 +13,7 @@ import {
 import { Role } from '@prisma/client';
 import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
+import { ResyncAccountDto } from './dto/resync-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentTenant } from '../common/decorators/current-tenant.decorator';
@@ -73,6 +74,17 @@ export class AccountsController {
   @Roles(Role.ADMIN)
   async sync(@Param('id', ParseUUIDPipe) id: string, @CurrentTenant() ctx: TenantContext) {
     const data = await this.accounts.triggerManualSync(ctx, id);
+    return { data };
+  }
+
+  @Post(':id/resync')
+  @Roles(Role.ADMIN)
+  async resync(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResyncAccountDto,
+    @CurrentTenant() ctx: TenantContext,
+  ) {
+    const data = await this.accounts.resyncFrom(ctx, id, dto);
     return { data };
   }
 }

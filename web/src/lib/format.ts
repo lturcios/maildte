@@ -52,3 +52,8 @@ export function formatDateTime(dateInput: string | Date | null): string {
   const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
   return DATE_TIME_FORMATTER.format(date);
 }
+
+/** yyyy-mm-dd de hoy en UTC — tope superior para los `<input type="date">` de syncFromDate. */
+export function todayUtcDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}

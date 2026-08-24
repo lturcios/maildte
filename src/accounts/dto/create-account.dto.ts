@@ -1,6 +1,7 @@
 import {
   IsBoolean,
   IsEmail,
+  IsISO8601,
   IsInt,
   IsOptional,
   IsString,
@@ -47,4 +48,9 @@ export class CreateAccountDto {
   @IsInt()
   @Min(60)
   syncInterval?: number;
+
+  /** Punto de partida de la primera sincronización (RF-02.2). Si se omite, se fija a now(). */
+  @IsOptional()
+  @IsISO8601()
+  syncFromDate?: string;
 }

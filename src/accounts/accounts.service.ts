@@ -6,7 +6,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma, SyncLog } from '@prisma/client';
+import { EmailAccount, Prisma, SyncLog } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { isPrismaUniqueViolation } from '../prisma/prisma-errors';
 import { AesService } from '../common/crypto/aes.service';
@@ -17,6 +17,7 @@ import { IMAP_ERROR_HTTP_STATUS, ImapConnectionError } from '../sync/imap/imap-e
 import { SyncScheduler } from '../sync/sync.scheduler';
 import { TenantContext } from '../common/tenancy/tenant-context';
 import { CreateAccountDto } from './dto/create-account.dto';
+import { ResyncAccountDto } from './dto/resync-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 
 const SAFE_ACCOUNT_SELECT = {
@@ -130,6 +131,7 @@ export class AccountsService {
             imapPassEnc,
             mailbox: dto.mailbox ?? 'INBOX',
             ...(dto.syncInterval !== undefined ? { syncInterval: dto.syncInterval } : {}),
+            ...(dto.syncFromDate !== undefined ? { syncFromDate: new Date(dto.syncFromDate) } : {}),
           },
           select: SAFE_ACCOUNT_SELECT,
         });
@@ -277,21 +279,37 @@ export class AccountsService {
 
   async triggerManualSync(ctx: TenantContext, id: string): Promise<{ enqueued: true }> {
     const tenantId = this.requireTenantId(ctx);
+    const account = await this.requireSyncableAccount(tenantId, id);
 
-    const account = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.emailAccount.findFirst({ where: this.whereActive(tenantId, { id }) }),
+    await this.scheduler.enqueueManual(tenantId, account.id);
+    return { enqueued: true };
+  }
+
+  /**
+   * Cambia el punto de partida de la cuenta y fuerza una re-sincronización
+   * completa: syncFromDate nuevo + lastSyncAt: null hace que el próximo sync
+   * entre por la rama de "primera sincronización" (sync.service.ts,
+   * resolveFirstSyncStartUid) y vuelva a recorrer el buzón desde esa fecha.
+   * Es seguro reprocesar ese rango: el constraint (accountId, messageId)
+   * hace que los correos ya archivados se detecten como duplicados en vez de
+   * descargarse dos veces.
+   */
+  async resyncFrom(
+    ctx: TenantContext,
+    id: string,
+    dto: ResyncAccountDto,
+  ): Promise<{ enqueued: true }> {
+    const tenantId = this.requireTenantId(ctx);
+    const account = await this.requireSyncableAccount(tenantId, id);
+
+    await this.prisma.withTenant(tenantId, (tx) =>
+      tx.emailAccount.update({
+        where: { id: account.id },
+        data: { syncFromDate: new Date(dto.syncFromDate), lastSyncAt: null },
+      }),
     );
-    if (!account) {
-      throw new NotFoundException(ACCOUNT_NOT_FOUND);
-    }
-    if (account.status !== 'ACTIVA') {
-      throw new UnprocessableEntityException({
-        error: 'ACCOUNT_NOT_SYNCABLE',
-        message: `La cuenta está en estado ${account.status} y no puede sincronizarse manualmente`,
-      });
-    }
 
-    await this.scheduler.enqueueManual(tenantId, id);
+    await this.scheduler.enqueueManual(tenantId, account.id);
     return { enqueued: true };
   }
 
@@ -321,6 +339,23 @@ export class AccountsService {
     extra: Prisma.EmailAccountWhereInput = {},
   ): Prisma.EmailAccountWhereInput {
     return { tenantId, deletedAt: null, ...extra };
+  }
+
+  /** Cuenta existente, del tenant, activa: precondición compartida por triggerManualSync y resyncFrom. */
+  private async requireSyncableAccount(tenantId: string, id: string): Promise<EmailAccount> {
+    const account = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.emailAccount.findFirst({ where: this.whereActive(tenantId, { id }) }),
+    );
+    if (!account) {
+      throw new NotFoundException(ACCOUNT_NOT_FOUND);
+    }
+    if (account.status !== 'ACTIVA') {
+      throw new UnprocessableEntityException({
+        error: 'ACCOUNT_NOT_SYNCABLE',
+        message: `La cuenta está en estado ${account.status} y no puede sincronizarse`,
+      });
+    }
+    return account;
   }
 
   private requireTenantId(ctx: TenantContext): string {
