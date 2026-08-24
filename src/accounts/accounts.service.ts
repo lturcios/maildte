@@ -57,6 +57,10 @@ const ACCOUNT_EMAIL_EXISTS = {
   error: 'ACCOUNT_EMAIL_EXISTS',
   message: 'Ya existe una cuenta registrada con este correo',
 };
+const ACCOUNT_FOLDER_EXISTS = {
+  error: 'ACCOUNT_FOLDER_EXISTS',
+  message: 'Ya existe una cuenta cuyo correo normaliza al mismo nombre de carpeta',
+};
 
 @Injectable()
 export class AccountsService {
@@ -98,8 +102,22 @@ export class AccountsService {
 
     let account: SafeAccount;
     try {
-      account = await this.prisma.withTenant(tenantId, (tx) =>
-        tx.emailAccount.create({
+      account = await this.prisma.withTenant(tenantId, async (tx) => {
+        // Chequeo previo en lugar de inferir el campo en conflicto desde
+        // err.meta.target: dentro de $transaction con RLS, Postgres aborta la
+        // transacción antes de que Prisma pueda resolver esos nombres de
+        // columna y meta.target llega null (ver AccountsService.create).
+        const conflict = await tx.emailAccount.findFirst({
+          where: { tenantId, deletedAt: null, OR: [{ email: dto.email }, { folderName }] },
+          select: { email: true },
+        });
+        if (conflict) {
+          throw new ConflictException(
+            conflict.email === dto.email ? ACCOUNT_EMAIL_EXISTS : ACCOUNT_FOLDER_EXISTS,
+          );
+        }
+
+        return tx.emailAccount.create({
           data: {
             tenantId,
             alias: dto.alias,
@@ -114,10 +132,13 @@ export class AccountsService {
             ...(dto.syncInterval !== undefined ? { syncInterval: dto.syncInterval } : {}),
           },
           select: SAFE_ACCOUNT_SELECT,
-        }),
-      );
+        });
+      });
     } catch (err) {
-      if (isPrismaUniqueViolation(err, 'email')) {
+      if (err instanceof ConflictException) {
+        throw err;
+      }
+      if (isPrismaUniqueViolation(err)) {
         throw new ConflictException(ACCOUNT_EMAIL_EXISTS);
       }
       throw err;
@@ -206,11 +227,23 @@ export class AccountsService {
 
     let updated: SafeAccount;
     try {
-      updated = await this.prisma.withTenant(tenantId, (tx) =>
-        tx.emailAccount.update({ where: { id }, data, select: SAFE_ACCOUNT_SELECT }),
-      );
+      updated = await this.prisma.withTenant(tenantId, async (tx) => {
+        if (dto.email !== undefined && dto.email !== existing.email) {
+          const conflict = await tx.emailAccount.findFirst({
+            where: { tenantId, deletedAt: null, email: dto.email, id: { not: id } },
+            select: { id: true },
+          });
+          if (conflict) {
+            throw new ConflictException(ACCOUNT_EMAIL_EXISTS);
+          }
+        }
+        return tx.emailAccount.update({ where: { id }, data, select: SAFE_ACCOUNT_SELECT });
+      });
     } catch (err) {
-      if (isPrismaUniqueViolation(err, 'email')) {
+      if (err instanceof ConflictException) {
+        throw err;
+      }
+      if (isPrismaUniqueViolation(err)) {
         throw new ConflictException(ACCOUNT_EMAIL_EXISTS);
       }
       throw err;

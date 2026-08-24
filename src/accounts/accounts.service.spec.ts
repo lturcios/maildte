@@ -47,6 +47,17 @@ function uniqueEmailViolation(): Prisma.PrismaClientKnownRequestError {
   });
 }
 
+// Reproduce el caso real: dentro de $transaction con RLS, Postgres aborta la
+// transacción antes de que Prisma resuelva las columnas del constraint y
+// meta.target llega null en vez de un array.
+function uniqueViolationWithNullTarget(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: '5.22.0',
+    meta: { modelName: 'EmailAccount', target: null },
+  });
+}
+
 describe('AccountsService', () => {
   let service: AccountsService;
   let aes: { encrypt: jest.Mock; decrypt: jest.Mock };
@@ -186,7 +197,38 @@ describe('AccountsService', () => {
       expect(prismaMock.emailAccount.create).not.toHaveBeenCalled();
     });
 
-    it('lanza ConflictException si el email ya está registrado', async () => {
+    it('lanza ConflictException (pre-check) si ya existe una cuenta activa con ese email', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue({ email: baseDto.email });
+
+      await expect(service.create(baseDto, TENANT_CTX)).rejects.toMatchObject({
+        status: 409,
+        response: { error: 'ACCOUNT_EMAIL_EXISTS' },
+      });
+      expect(prismaMock.emailAccount.create).not.toHaveBeenCalled();
+      expect(storage.ensureAccountFolder).not.toHaveBeenCalled();
+    });
+
+    it('lanza ConflictException (pre-check) si otro email ya normaliza al mismo folderName', async () => {
+      // "compras" con acento normaliza igual que el email ya registrado.
+      prismaMock.emailAccount.findFirst.mockResolvedValue({ email: 'otra@ltsoft.us' });
+
+      await expect(service.create(baseDto, TENANT_CTX)).rejects.toMatchObject({
+        status: 409,
+        response: { error: 'ACCOUNT_FOLDER_EXISTS' },
+      });
+      expect(prismaMock.emailAccount.create).not.toHaveBeenCalled();
+    });
+
+    it('lanza ConflictException como red de seguridad si el constraint de DB salta con meta.target null', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue(null);
+      prismaMock.emailAccount.create.mockRejectedValue(uniqueViolationWithNullTarget());
+
+      await expect(service.create(baseDto, TENANT_CTX)).rejects.toBeInstanceOf(ConflictException);
+      expect(storage.ensureAccountFolder).not.toHaveBeenCalled();
+    });
+
+    it('lanza ConflictException si el email ya está registrado (P2002 con target)', async () => {
+      prismaMock.emailAccount.findFirst.mockResolvedValue(null);
       prismaMock.emailAccount.create.mockRejectedValue(uniqueEmailViolation());
 
       await expect(service.create(baseDto, TENANT_CTX)).rejects.toBeInstanceOf(ConflictException);
@@ -295,6 +337,17 @@ describe('AccountsService', () => {
       await service.update(TENANT_CTX, 'acc-1', { alias: 'Nuevo alias' });
 
       expect(scheduler.resetAuthFailures).not.toHaveBeenCalled();
+    });
+
+    it('lanza ConflictException si el nuevo email ya lo usa otra cuenta del tenant', async () => {
+      prismaMock.emailAccount.findFirst
+        .mockResolvedValueOnce({ ...existingAccount, email: 'compras@ltsoft.us' })
+        .mockResolvedValueOnce({ id: 'acc-2' });
+
+      await expect(
+        service.update(TENANT_CTX, 'acc-1', { email: 'ventas@ltsoft.us' }),
+      ).rejects.toMatchObject({ status: 409, response: { error: 'ACCOUNT_EMAIL_EXISTS' } });
+      expect(prismaMock.emailAccount.update).not.toHaveBeenCalled();
     });
 
     it('no persiste credenciales nuevas si la revalidación falla', async () => {

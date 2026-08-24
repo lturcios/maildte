@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
 import { SuperadminRoute } from '@/components/layout/SuperadminRoute';
+import { TenantRoute } from '@/components/layout/TenantRoute';
 import { Toaster } from '@/components/ui/sonner';
 import { CorreosPage } from '@/pages/CorreosPage';
 import { CuentasPage } from '@/pages/CuentasPage';
@@ -23,10 +24,12 @@ function App() {
 
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
-            <Route index element={<DashboardPage />} />
-            <Route path="cuentas" element={<CuentasPage />} />
-            <Route path="correos" element={<CorreosPage />} />
-            <Route path="logs" element={<LogsPage />} />
+            <Route element={<TenantRoute />}>
+              <Route index element={<DashboardPage />} />
+              <Route path="cuentas" element={<CuentasPage />} />
+              <Route path="correos" element={<CorreosPage />} />
+              <Route path="logs" element={<LogsPage />} />
+            </Route>
             <Route element={<SuperadminRoute />}>
               <Route path="organizaciones" element={<OrganizacionesPage />} />
             </Route>

@@ -85,7 +85,7 @@ export function AppLayout() {
           <span className="text-xs text-muted-foreground">Collector</span>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-3">
-          {[...NAV_ITEMS, ...(user?.role === 'SUPERADMIN' ? [SUPERADMIN_NAV_ITEM] : [])].map(
+          {(user?.role === 'SUPERADMIN' ? [SUPERADMIN_NAV_ITEM] : NAV_ITEMS).map(
             ({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}

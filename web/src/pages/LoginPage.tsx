@@ -42,6 +42,7 @@ export function LoginPage() {
       const meResponse = await apiGet<AuthUserResponse>('/me');
       setUser(meResponse.data);
 
+      // TenantRoute redirige a /organizaciones si el rol es SUPERADMIN.
       navigate('/', { replace: true });
     } catch (error) {
       if (error instanceof ApiError) {
