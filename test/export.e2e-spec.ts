@@ -220,6 +220,45 @@ describe('Export (e2e)', () => {
       expect(ids).toContain(julyAttachmentIds[5]); // offset 180_000
     });
 
+    it('until filtra exacto: solo createdAt menor o igual al cursor de fecha', async () => {
+      const untilCutoff = new Date(sinceCutoff.getTime() + 120_000); // baseTime + 180_000
+
+      const res = await request(app.getHttpServer())
+        .get('/api/v1/export/manifest')
+        .query({
+          accountId: ACCOUNT_ID,
+          until: untilCutoff.toISOString(),
+          month: '2026-07',
+          limit: 100,
+        })
+        .set('X-Api-Key', apiKey);
+
+      expect(res.status).toBe(200);
+      const ids: string[] = res.body.data.map((e: { attachmentId: string }) => e.attachmentId);
+      expect(ids).toContain(julyAttachmentIds[0]); // offset 0
+      expect(ids).toContain(julyAttachmentIds[4]); // offset 120_000
+      expect(ids).toContain(julyAttachmentIds[5]); // offset 180_000 === cutoff, "menor o igual"
+    });
+
+    it('since y until combinados acotan un período: solo lo estrictamente entre ambos', async () => {
+      const untilCutoff = new Date(sinceCutoff.getTime() + 60_000); // baseTime + 120_000
+
+      const res = await request(app.getHttpServer())
+        .get('/api/v1/export/manifest')
+        .query({
+          accountId: ACCOUNT_ID,
+          since: sinceCutoff.toISOString(),
+          until: untilCutoff.toISOString(),
+          month: '2026-07',
+          limit: 100,
+        })
+        .set('X-Api-Key', apiKey);
+
+      expect(res.status).toBe(200);
+      const ids: string[] = res.body.data.map((e: { attachmentId: string }) => e.attachmentId);
+      expect(ids).toEqual([julyAttachmentIds[4]]); // solo offset 120_000: > 60_000 y <= 120_000
+    });
+
     it('filtra por month: solo trae adjuntos de ese mes', async () => {
       const res = await request(app.getHttpServer())
         .get('/api/v1/export/manifest')

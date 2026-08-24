@@ -63,7 +63,7 @@ export class ExportService {
 
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
-      const baseWhere = this.buildWhere(tenantId, dto.accountId, dto.since, dto.month);
+      const baseWhere = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
       const cursorWhere = await this.resolveCursorWhere(tx, tenantId, dto.cursorId);
       const where: Prisma.AttachmentWhereInput = { ...baseWhere, ...cursorWhere };
 
@@ -107,7 +107,7 @@ export class ExportService {
   /** RF-07.3: todas las filas que matchean el filtro, sin paginar (uso exclusivo del ZIP). */
   async findAllForArchive(ctx: TenantContext, dto: ExportArchiveDto): Promise<AttachmentRow[]> {
     const tenantId = this.requireTenantId(ctx);
-    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.month);
+    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
       return tx.attachment.findMany({
@@ -120,7 +120,7 @@ export class ExportService {
 
   async countForArchive(ctx: TenantContext, dto: ExportArchiveDto): Promise<number> {
     const tenantId = this.requireTenantId(ctx);
-    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.month);
+    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
       return tx.attachment.count({ where });
@@ -154,6 +154,7 @@ export class ExportService {
     tenantId: string,
     accountId: string,
     since?: string,
+    until?: string,
     month?: string,
   ): Prisma.AttachmentWhereInput {
     return {
@@ -162,7 +163,14 @@ export class ExportService {
         accountId,
         ...(month ? { monthFolder: month } : {}),
       },
-      ...(since ? { createdAt: { gt: new Date(since) } } : {}),
+      ...(since || until
+        ? {
+            createdAt: {
+              ...(since ? { gt: new Date(since) } : {}),
+              ...(until ? { lte: new Date(until) } : {}),
+            },
+          }
+        : {}),
     };
   }
 

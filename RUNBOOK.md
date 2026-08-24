@@ -56,6 +56,16 @@ tenés un token de acceso (`TOKEN`) obtenido con `POST /auth/login` (sección 3)
    curl -s http://127.0.0.1:3000/api/v1/health             # {"data":{"status":"ok",...}}
    ```
 
+   El `up -d --build` anterior crea el volumen `storage` (montado en
+   `/data/storage`) por primera vez — Docker lo deja con dueño `root:root`,
+   pero api/worker corren como `node` (uid 1000, ver Dockerfile). Sin este
+   paso, la primera cuenta IMAP que se cree falla con
+   `EACCES: permission denied, mkdir '/data/storage/...'`:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml exec --user root api chown -R node:node /data/storage
+   ```
+
 4. Configurá nginx: copiá `nginx/maildte.conf` a `/etc/nginx/sites-available/`,
    reemplazá `DOMINIO` por el real, symlink a `sites-enabled/`, `nginx -t`, y:
 

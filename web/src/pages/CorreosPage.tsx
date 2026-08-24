@@ -8,6 +8,7 @@ import { useAccounts } from '@/hooks/useAccounts';
 import type { Attachment, Paginated, ProcessedEmailWithAttachments } from '@/types/domain';
 import { EmailStatusBadge } from '@/components/common/StatusBadges';
 import { Pagination } from '@/components/common/Pagination';
+import { ExportZipPanel } from '@/components/emails/ExportZipPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -264,6 +265,15 @@ export function CorreosPage() {
           </Select>
         </div>
       </div>
+
+      {filters.accountId !== 'all' && (
+        <ExportZipPanel
+          accountId={filters.accountId}
+          accountAlias={getAlias(filters.accountId)}
+          from={filters.from}
+          to={filters.to}
+        />
+      )}
 
       <div className="rounded-md border border-border">
         <Table>

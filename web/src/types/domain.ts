@@ -150,6 +150,35 @@ export interface Paginated<T> {
   meta: { page: number; limit: number; total: number };
 }
 
+/**
+ * Respuesta de GET /export/manifest. A diferencia de ListEmailsQuery (que
+ * filtra por status/sender/hasAttachments sobre ProcessedEmail), el export
+ * solo entiende accountId + since/until (createdAt del Attachment, no
+ * receivedAt del correo) o month — ver ExportManifestDto/ExportArchiveDto.
+ */
+export interface ExportManifestEntry {
+  attachmentId: string;
+  relativePath: string;
+  fileType: AttachmentFileType;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: string;
+  receivedAt: string;
+  senderEmail: string;
+  missing: boolean;
+}
+
+export interface ExportManifestPage {
+  data: ExportManifestEntry[];
+  meta: {
+    nextCursor: string | null;
+    maxCreatedAt: string | null;
+    totalFiles: number;
+    totalBytes: number;
+    missingFiles: number;
+  };
+}
+
 export interface AccountSummary {
   accountId: string;
   emailsByStatus: Partial<Record<EmailStatus, number>>;
