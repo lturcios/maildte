@@ -7,6 +7,7 @@ import {
   MailSearch,
   Moon,
   ScrollText,
+  ServerCog,
   Sun,
 } from 'lucide-react';
 
@@ -32,13 +33,11 @@ const NAV_ITEMS = [
   { to: '/logs', label: 'Logs', icon: ScrollText, end: false },
 ] as const;
 
-/** Solo visible para SUPERADMIN; la ruta también está protegida por SuperadminRoute. */
-const SUPERADMIN_NAV_ITEM = {
-  to: '/organizaciones',
-  label: 'Organizaciones',
-  icon: Building2,
-  end: false,
-} as const;
+/** Solo visibles para SUPERADMIN; las rutas también están protegidas por SuperadminRoute. */
+const SUPERADMIN_NAV_ITEMS = [
+  { to: '/organizaciones', label: 'Organizaciones', icon: Building2, end: false },
+  { to: '/servicios-correo', label: 'Servicios de correo', icon: ServerCog, end: false },
+] as const;
 
 function initialsFrom(name: string, email: string): string {
   const source = name.trim() || email;
@@ -85,7 +84,7 @@ export function AppLayout() {
           <span className="text-xs text-muted-foreground">Collector</span>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-3">
-          {(user?.role === 'SUPERADMIN' ? [SUPERADMIN_NAV_ITEM] : NAV_ITEMS).map(
+          {(user?.role === 'SUPERADMIN' ? SUPERADMIN_NAV_ITEMS : NAV_ITEMS).map(
             ({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}

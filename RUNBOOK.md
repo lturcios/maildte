@@ -110,7 +110,22 @@ tenés un token de acceso (`TOKEN`) obtenido con `POST /auth/login` (sección 3)
    (Postgres solo escucha en `127.0.0.1:5433` del VPS — nunca expuesto a
    internet, ver `docker-compose.prod.yml`.)
 
-7. Programá el respaldo diario (sección 8) en cron.
+7. Sembrá el catálogo de servicios de correo (Addendum 09). Mismo mecanismo que
+   el punto anterior: fuera del contenedor, con `APP_DATABASE_URL`. Es
+   idempotente (upsert por `key`), así que se re-ejecuta sin miedo cada vez que
+   se agreguen proveedores nuevos:
+
+   ```bash
+   APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte \
+   pnpm run seed:mail-providers
+   ```
+
+   En una instalación que ya tenía cuentas cargadas, agregá `-- --link-existing`
+   para vincular las que tengan un `imapHost` idéntico al de un perfil. Sin ese
+   flag el script no toca ninguna cuenta: las existentes quedan como "servidor
+   personalizado" y siguen sincronizando exactamente igual.
+
+8. Programá el respaldo diario (sección 8) en cron.
 
 ---
 
@@ -131,6 +146,129 @@ pnpm run migrate:to-multitenant
 Es idempotente (podés re-correrlo sin miedo) y al final imprime una API key de
 migración para que el `maildte-pull` que ya estaba en uso siga funcionando sin
 reconfiguración adicional del lado del cliente (más allá de la key nueva).
+
+---
+
+## 2.b Actualización a perfiles de servicio de correo (Addendum 09)
+
+Estos son **todos** los pasos para llevar el Addendum 09 a un VPS que ya está
+corriendo. Se ejecutan una sola vez, en este orden.
+
+**Qué trae**: catálogo maestro de servicios de correo administrado por
+SUPERADMIN, detección automática del proveedor al dar de alta una cuenta, y una
+corrección de RLS que arreglaba un 500 intermitente en el login de SUPERADMIN.
+
+**Ventana de servicio**: no hace falta. Ninguna migración reescribe datos
+existentes y las cuentas que ya sincronizan siguen funcionando igual (quedan
+como "servidor personalizado" hasta que se las vincule a un perfil).
+
+### 1. Traer el código y reconstruir
+
+```bash
+cd /opt/maildte
+git pull
+docker compose -f docker-compose.prod.yml build
+```
+
+### 2. Aplicar las migraciones
+
+Las levanta el contenedor `api` al arrancar (`prisma migrate deploy`), así que
+alcanza con el `up`. Son dos:
+
+- `20260901120000_mail_providers` — tablas del catálogo y la columna
+  `email_accounts.providerId` (nullable, sin backfill: **no toca ninguna fila
+  existente**).
+- `20260902000000_fix_superadmin_rls_null_tenant` — recrea 3 policies de RLS de
+  `users`. No amplía permisos: le devuelve al SUPERADMIN el acceso a su propia
+  fila, que perdía cuando la conexión del pool ya había servido a un tenant.
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml logs -f api | head -40   # confirmar "migrations have been successfully applied"
+```
+
+### 3. Sembrar el catálogo de servicios
+
+Corre **fuera** del contenedor (la imagen de producción no trae `ts-node`),
+igual que `seed:superadmin` de la sección 1. Es idempotente: se re-ejecuta cada
+vez que se agreguen proveedores nuevos.
+
+```bash
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte \
+pnpm run seed:mail-providers
+```
+
+Deja 9 perfiles y 26 dominios de detección (Gmail/Workspace, Microsoft 365,
+Yahoo, iCloud, Zoho, GoDaddy, Namecheap, Hostinger, Rackspace).
+
+### 4. (Opcional) Vincular las cuentas que ya existen
+
+Sin este paso, las cuentas actuales quedan como "servidor personalizado" y
+**siguen sincronizando exactamente igual**. El flag las vincula al perfil cuyo
+`imapHost` coincida de forma exacta:
+
+```bash
+APP_DATABASE_URL=... pnpm run seed:mail-providers -- --link-existing
+```
+
+Conviene: a partir de ahí, corregir un host en el catálogo alcanza para todas.
+Ojo con la contrapartida de ADR-09.1 antes de decidirlo.
+
+### 5. Publicar el panel web
+
+```bash
+cd web && pnpm install && pnpm build     # deja el bundle en web/dist
+```
+
+Copiar `web/dist` a donde lo sirva el reverse proxy bajo `/panel`.
+
+### 6. Verificación post-despliegue
+
+```bash
+# 1. Login de SUPERADMIN varias veces seguidas (esto fallaba con el bug de RLS)
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null -w "login=%{http_code}\n" \
+    -X POST https://api.tudominio.com/api/v1/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"<superadmin>","password":"<clave>"}'
+done
+# Esperado: cinco 200. Un 500 significa que la migración de RLS no se aplicó.
+
+# 2. Catálogo cargado (con un token de cualquier usuario)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://api.tudominio.com/api/v1/mail-providers | head -c 200
+
+# 3. Detección por MX contra un dominio propio real de un cliente
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.tudominio.com/api/v1/mail-providers/resolve?email=alguien@sudominio.com"
+```
+
+En el panel, entrando como SUPERADMIN, tiene que aparecer **Servicios de
+correo** en el menú, con los 9 perfiles y el botón de probar servidor.
+
+### 7. Antes de habilitar el perfil de Microsoft 365 para clientes
+
+El perfil trae host y puerto correctos (verificado: `outlook.office365.com:993`
+responde `* OK Microsoft Exchange IMAP4 service ready`), **pero eso no prueba
+que la autenticación básica funcione**. Microsoft viene retirando usuario y
+contraseña en IMAP a favor de OAuth2. Probalo con una cuenta real antes de
+ofrecerlo; si no funciona, deshabilitá el perfil (`active: false`) desde el
+panel en vez de borrarlo.
+
+### Rollback
+
+Las migraciones son aditivas y no destructivas, así que revertir es volver la
+imagen a la versión anterior:
+
+```bash
+git checkout <commit-anterior>
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Las tablas del catálogo y la columna `providerId` quedan en la base sin uso: el
+código viejo no las mira. **Pero si se corrió `--link-existing`**, las cuentas
+vinculadas tienen sus columnas `imapHost/imapPort/imapSecure` intactas (nunca se
+borran), así que el código viejo las lee y sigue funcionando. No hay pérdida.
 
 ---
 

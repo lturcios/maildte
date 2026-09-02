@@ -14,11 +14,32 @@ import { normalizeFolderName } from '../common/utils/normalize-folder-name';
 import { StorageService } from '../storage/storage.service';
 import { ImapClientFactory, ImapCredentials } from '../sync/imap/imap-client.factory';
 import { IMAP_ERROR_HTTP_STATUS, ImapConnectionError } from '../sync/imap/imap-error';
+import { ImapEndpoint, resolveImapEndpoint } from '../sync/imap/resolve-imap-endpoint';
 import { SyncScheduler } from '../sync/sync.scheduler';
 import { TenantContext } from '../common/tenancy/tenant-context';
 import { CreateAccountDto } from './dto/create-account.dto';
 import { ResyncAccountDto } from './dto/resync-account.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
+
+/**
+ * Datos del perfil que se exponen junto a la cuenta. La tabla no tiene secretos,
+ * pero se seleccionan campo por campo igual que el resto del proyecto: el
+ * frontend necesita el endpoint efectivo, `strict` para la advertencia al
+ * cambiarlo y notes/helpUrl para explicar el requisito de autenticación.
+ */
+const SAFE_PROVIDER_SELECT = {
+  id: true,
+  key: true,
+  name: true,
+  imapHost: true,
+  imapPort: true,
+  imapSecure: true,
+  defaultMailbox: true,
+  strict: true,
+  notes: true,
+  helpUrl: true,
+  active: true,
+} satisfies Prisma.MailProviderSelect;
 
 const SAFE_ACCOUNT_SELECT = {
   id: true,
@@ -26,6 +47,12 @@ const SAFE_ACCOUNT_SELECT = {
   alias: true,
   email: true,
   folderName: true,
+  providerId: true,
+  provider: { select: SAFE_PROVIDER_SELECT },
+  // Con providerId != null estas tres columnas NO son la configuración vigente
+  // (manda el perfil): quedan como último endpoint escrito y como punto de
+  // partida si la cuenta se desvincula. El valor efectivo sale siempre de
+  // resolveImapEndpoint().
   imapHost: true,
   imapPort: true,
   imapSecure: true,
@@ -45,7 +72,9 @@ const SAFE_ACCOUNT_SELECT = {
 
 type SafeAccount = Prisma.EmailAccountGetPayload<{ select: typeof SAFE_ACCOUNT_SELECT }>;
 
+/** Campos que, al cambiar, obligan a revalidar la conexión IMAP antes de guardar. */
 const CREDENTIAL_FIELDS = [
+  'providerId',
   'imapHost',
   'imapPort',
   'imapSecure',
@@ -54,6 +83,15 @@ const CREDENTIAL_FIELDS = [
 ] as const;
 
 const ACCOUNT_NOT_FOUND = { error: 'ACCOUNT_NOT_FOUND', message: 'Cuenta no encontrada' };
+const PROVIDER_NOT_FOUND = {
+  error: 'PROVIDER_NOT_FOUND',
+  message: 'El servicio de correo seleccionado no existe o está deshabilitado',
+};
+const IMAP_ENDPOINT_REQUIRED = {
+  error: 'IMAP_ENDPOINT_REQUIRED',
+  message:
+    'Sin un servicio de correo seleccionado hay que indicar servidor IMAP, puerto y uso de TLS/SSL',
+};
 const ACCOUNT_EMAIL_EXISTS = {
   error: 'ACCOUNT_EMAIL_EXISTS',
   message: 'Ya existe una cuenta registrada con este correo',
@@ -90,10 +128,14 @@ export class AccountsService {
       });
     }
 
-    await this.verifyOrThrow({
+    const { providerId, endpoint } = await this.resolveWriteEndpoint(dto.providerId ?? null, {
       imapHost: dto.imapHost,
       imapPort: dto.imapPort,
       imapSecure: dto.imapSecure,
+    });
+
+    await this.verifyOrThrow({
+      ...endpoint,
       imapUser: dto.imapUser,
       imapPassword: dto.imapPassword,
     });
@@ -124,9 +166,12 @@ export class AccountsService {
             alias: dto.alias,
             email: dto.email,
             folderName,
-            imapHost: dto.imapHost,
-            imapPort: dto.imapPort,
-            imapSecure: dto.imapSecure,
+            providerId,
+            // Las columnas imap* se persisten con el endpoint efectivo al momento
+            // del alta: son NOT NULL, y si la cuenta se desvincula del perfil más
+            // adelante quedan como punto de partida sensato. Mientras haya
+            // providerId, nadie las lee (resolveImapEndpoint).
+            ...endpoint,
             imapUser: dto.imapUser,
             imapPassEnc,
             mailbox: dto.mailbox ?? 'INBOX',
@@ -197,11 +242,22 @@ export class AccountsService {
 
     const credentialsChanged = CREDENTIAL_FIELDS.some((field) => dto[field] !== undefined);
 
+    // El vínculo con el perfil solo cambia si el PATCH trae la clave: ausente
+    // deja lo que hay, un UUID vincula, null desvincula (ver UpdateAccountDto).
+    // Al desvincular sin mandar host/puerto/TLS, el endpoint efectivo de este
+    // momento queda congelado en las columnas propias: "soltar el perfil y
+    // quedarse como está" es lo menos sorpresivo.
+    const nextProviderId =
+      dto.providerId !== undefined ? dto.providerId : (existing.providerId ?? null);
+    const { providerId, endpoint } = await this.resolveWriteEndpoint(nextProviderId, {
+      imapHost: dto.imapHost ?? existing.imapHost,
+      imapPort: dto.imapPort ?? existing.imapPort,
+      imapSecure: dto.imapSecure ?? existing.imapSecure,
+    });
+
     if (credentialsChanged) {
       await this.verifyOrThrow({
-        imapHost: dto.imapHost ?? existing.imapHost,
-        imapPort: dto.imapPort ?? existing.imapPort,
-        imapSecure: dto.imapSecure ?? existing.imapSecure,
+        ...endpoint,
         imapUser: dto.imapUser ?? existing.imapUser,
         imapPassword: dto.imapPassword ?? this.aes.decrypt(existing.imapPassEnc),
       });
@@ -210,9 +266,12 @@ export class AccountsService {
     const data: Prisma.EmailAccountUpdateInput = {
       ...(dto.alias !== undefined ? { alias: dto.alias } : {}),
       ...(dto.email !== undefined ? { email: dto.email } : {}),
-      ...(dto.imapHost !== undefined ? { imapHost: dto.imapHost } : {}),
-      ...(dto.imapPort !== undefined ? { imapPort: dto.imapPort } : {}),
-      ...(dto.imapSecure !== undefined ? { imapSecure: dto.imapSecure } : {}),
+      ...(credentialsChanged
+        ? {
+            ...endpoint,
+            provider: providerId ? { connect: { id: providerId } } : { disconnect: true },
+          }
+        : {}),
       ...(dto.imapUser !== undefined ? { imapUser: dto.imapUser } : {}),
       ...(dto.imapPassword !== undefined
         ? { imapPassEnc: this.aes.encrypt(dto.imapPassword) }
@@ -316,22 +375,70 @@ export class AccountsService {
   async testConnection(ctx: TenantContext, id: string): Promise<{ ok: true; latencyMs: number }> {
     const tenantId = this.requireTenantId(ctx);
 
+    // include del perfil: la prueba tiene que usar el mismo endpoint que va a
+    // usar el sync, no las columnas propias de la cuenta (Addendum 09).
     const account = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.emailAccount.findFirst({ where: this.whereActive(tenantId, { id }) }),
+      tx.emailAccount.findFirst({
+        where: this.whereActive(tenantId, { id }),
+        include: { provider: true },
+      }),
     );
     if (!account) {
       throw new NotFoundException(ACCOUNT_NOT_FOUND);
     }
 
     const { latencyMs } = await this.verifyOrThrow({
-      imapHost: account.imapHost,
-      imapPort: account.imapPort,
-      imapSecure: account.imapSecure,
+      ...resolveImapEndpoint(account),
       imapUser: account.imapUser,
       imapPassword: this.aes.decrypt(account.imapPassEnc),
     });
 
     return { ok: true, latencyMs };
+  }
+
+  /**
+   * Resuelve el endpoint efectivo de un alta o edición y valida la coherencia
+   * del par (perfil, columnas propias). Con perfil, el catálogo manda y las
+   * columnas se ignoran; sin perfil, las tres columnas son obligatorias.
+   *
+   * Lee `mail_providers` fuera de withTenant a propósito: es un catálogo global
+   * sin tenantId y sin RLS (ver la migración mail_providers).
+   */
+  private async resolveWriteEndpoint(
+    providerId: string | null,
+    own: Partial<ImapEndpoint>,
+  ): Promise<{ providerId: string | null; endpoint: ImapEndpoint }> {
+    if (providerId !== null) {
+      const provider = await this.prisma.mailProvider.findFirst({
+        where: { id: providerId, active: true },
+        select: { imapHost: true, imapPort: true, imapSecure: true },
+      });
+      if (!provider) {
+        throw new UnprocessableEntityException(PROVIDER_NOT_FOUND);
+      }
+      // Misma regla que resolveImapEndpoint: con perfil, las columnas propias
+      // que venga trayendo el DTO se descartan.
+      return {
+        providerId,
+        endpoint: {
+          imapHost: provider.imapHost,
+          imapPort: provider.imapPort,
+          imapSecure: provider.imapSecure,
+        },
+      };
+    }
+
+    if (own.imapHost === undefined || own.imapPort === undefined || own.imapSecure === undefined) {
+      throw new UnprocessableEntityException(IMAP_ENDPOINT_REQUIRED);
+    }
+    return {
+      providerId: null,
+      endpoint: {
+        imapHost: own.imapHost,
+        imapPort: own.imapPort,
+        imapSecure: own.imapSecure,
+      },
+    };
   }
 
   private whereActive(

@@ -36,7 +36,19 @@ const prismaMock = {
   tenant: {
     findUnique: jest.fn(),
   },
+  // Catálogo global del Addendum 09: se consulta fuera de withTenant, por eso
+  // cuelga del mock raíz y no del "tx" que recibe el callback.
+  mailProvider: {
+    findFirst: jest.fn(),
+  },
   withTenant: jest.fn(callWithTenantMock),
+};
+
+const GMAIL_PROVIDER = {
+  id: '3f1b0a2e-6c4d-4f8a-9b1e-0d2c5a7e9f31',
+  imapHost: 'imap.gmail.com',
+  imapPort: 993,
+  imapSecure: true,
 };
 
 function uniqueEmailViolation(): Prisma.PrismaClientKnownRequestError {
@@ -140,6 +152,73 @@ describe('AccountsService', () => {
         expect.objectContaining({ id: 'acc-1' }),
       );
       expect(result).not.toHaveProperty('imapPassEnc');
+    });
+
+    // Addendum 09 — catálogo de perfiles de servicio de correo.
+    describe('perfil de servicio de correo', () => {
+      it('con providerId toma el endpoint del perfil e ignora los imap* del DTO', async () => {
+        prismaMock.mailProvider.findFirst.mockResolvedValue(GMAIL_PROVIDER);
+        prismaMock.emailAccount.create.mockResolvedValue({ id: 'acc-1' });
+
+        await service.create(
+          {
+            ...baseDto,
+            providerId: GMAIL_PROVIDER.id,
+            imapHost: 'host.que.debe.ignorarse',
+            imapPort: 143,
+            imapSecure: false,
+          },
+          TENANT_CTX,
+        );
+
+        expect(imap.verifyConnection).toHaveBeenCalledWith(
+          expect.objectContaining({ imapHost: 'imap.gmail.com', imapPort: 993, imapSecure: true }),
+        );
+        const callArg = prismaMock.emailAccount.create.mock.calls[0][0];
+        expect(callArg.data.providerId).toBe(GMAIL_PROVIDER.id);
+        expect(callArg.data.imapHost).toBe('imap.gmail.com');
+      });
+
+      it('sin providerId usa los imap* del DTO y deja el vínculo en null (servidor personalizado)', async () => {
+        prismaMock.emailAccount.create.mockResolvedValue({ id: 'acc-1' });
+
+        await service.create(
+          { ...baseDto, imapHost: 'mail.empresa.com.sv', imapPort: 143, imapSecure: false },
+          TENANT_CTX,
+        );
+
+        expect(prismaMock.mailProvider.findFirst).not.toHaveBeenCalled();
+        expect(imap.verifyConnection).toHaveBeenCalledWith(
+          expect.objectContaining({ imapHost: 'mail.empresa.com.sv', imapPort: 143 }),
+        );
+        const callArg = prismaMock.emailAccount.create.mock.calls[0][0];
+        expect(callArg.data.providerId).toBeNull();
+      });
+
+      it('retorna 422 PROVIDER_NOT_FOUND si el perfil no existe o está inactivo', async () => {
+        prismaMock.mailProvider.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.create({ ...baseDto, providerId: GMAIL_PROVIDER.id }, TENANT_CTX),
+        ).rejects.toMatchObject({ status: 422, response: { error: 'PROVIDER_NOT_FOUND' } });
+        expect(imap.verifyConnection).not.toHaveBeenCalled();
+        expect(prismaMock.emailAccount.create).not.toHaveBeenCalled();
+      });
+
+      it('retorna 422 IMAP_ENDPOINT_REQUIRED si no hay perfil ni datos de servidor', async () => {
+        const sinEndpoint: CreateAccountDto = {
+          alias: baseDto.alias,
+          email: baseDto.email,
+          imapUser: baseDto.imapUser,
+          imapPassword: baseDto.imapPassword,
+        };
+
+        await expect(service.create(sinEndpoint, TENANT_CTX)).rejects.toMatchObject({
+          status: 422,
+          response: { error: 'IMAP_ENDPOINT_REQUIRED' },
+        });
+        expect(prismaMock.emailAccount.create).not.toHaveBeenCalled();
+      });
     });
 
     it('calcula folderName: compras@ltsoft.us -> compras_ltsoft_us', async () => {
@@ -299,6 +378,7 @@ describe('AccountsService', () => {
   describe('update', () => {
     const existingAccount = {
       id: 'acc-1',
+      providerId: null,
       imapHost: 'imap.gmail.com',
       imapPort: 993,
       imapSecure: true,
@@ -306,6 +386,85 @@ describe('AccountsService', () => {
       imapPassEnc: 'enc(clave-vieja)',
       status: 'ACTIVA',
     };
+
+    // Addendum 09 — cambiar el vínculo con el perfil.
+    describe('perfil de servicio de correo', () => {
+      it('vincular a un perfil revalida con el endpoint del perfil y conecta la relación', async () => {
+        prismaMock.emailAccount.findFirst.mockResolvedValue({
+          ...existingAccount,
+          imapHost: 'mail.viejo.example',
+          imapPort: 143,
+          imapSecure: false,
+        });
+        prismaMock.mailProvider.findFirst.mockResolvedValue(GMAIL_PROVIDER);
+        prismaMock.emailAccount.update.mockResolvedValue({ id: 'acc-1' });
+
+        await service.update(TENANT_CTX, 'acc-1', { providerId: GMAIL_PROVIDER.id });
+
+        expect(imap.verifyConnection).toHaveBeenCalledWith(
+          expect.objectContaining({ imapHost: 'imap.gmail.com', imapPort: 993, imapSecure: true }),
+        );
+        const callArg = prismaMock.emailAccount.update.mock.calls[0][0];
+        expect(callArg.data.provider).toEqual({ connect: { id: GMAIL_PROVIDER.id } });
+        expect(callArg.data.imapHost).toBe('imap.gmail.com');
+      });
+
+      it('providerId: null desvincula y congela el endpoint vigente en las columnas propias', async () => {
+        prismaMock.emailAccount.findFirst.mockResolvedValue({
+          ...existingAccount,
+          providerId: GMAIL_PROVIDER.id,
+        });
+        prismaMock.emailAccount.update.mockResolvedValue({ id: 'acc-1' });
+
+        await service.update(TENANT_CTX, 'acc-1', { providerId: null });
+
+        expect(prismaMock.mailProvider.findFirst).not.toHaveBeenCalled();
+        const callArg = prismaMock.emailAccount.update.mock.calls[0][0];
+        expect(callArg.data.provider).toEqual({ disconnect: true });
+        expect(callArg.data.imapHost).toBe('imap.gmail.com');
+      });
+
+      it('un PATCH sin providerId no toca el vínculo existente', async () => {
+        prismaMock.emailAccount.findFirst.mockResolvedValue({
+          ...existingAccount,
+          providerId: GMAIL_PROVIDER.id,
+        });
+        prismaMock.mailProvider.findFirst.mockResolvedValue(GMAIL_PROVIDER);
+        prismaMock.emailAccount.update.mockResolvedValue({ id: 'acc-1' });
+
+        await service.update(TENANT_CTX, 'acc-1', { imapPassword: 'clave-nueva' });
+
+        const callArg = prismaMock.emailAccount.update.mock.calls[0][0];
+        expect(callArg.data.provider).toEqual({ connect: { id: GMAIL_PROVIDER.id } });
+      });
+
+      it('con la cuenta vinculada a un perfil, mandar imapHost no cambia el endpoint efectivo', async () => {
+        prismaMock.emailAccount.findFirst.mockResolvedValue({
+          ...existingAccount,
+          providerId: GMAIL_PROVIDER.id,
+        });
+        prismaMock.mailProvider.findFirst.mockResolvedValue(GMAIL_PROVIDER);
+        prismaMock.emailAccount.update.mockResolvedValue({ id: 'acc-1' });
+
+        await service.update(TENANT_CTX, 'acc-1', { imapHost: 'host.que.debe.ignorarse' });
+
+        expect(imap.verifyConnection).toHaveBeenCalledWith(
+          expect.objectContaining({ imapHost: 'imap.gmail.com' }),
+        );
+        const callArg = prismaMock.emailAccount.update.mock.calls[0][0];
+        expect(callArg.data.imapHost).toBe('imap.gmail.com');
+      });
+
+      it('retorna 422 PROVIDER_NOT_FOUND y no persiste si el perfil no existe', async () => {
+        prismaMock.emailAccount.findFirst.mockResolvedValue(existingAccount);
+        prismaMock.mailProvider.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.update(TENANT_CTX, 'acc-1', { providerId: GMAIL_PROVIDER.id }),
+        ).rejects.toMatchObject({ status: 422, response: { error: 'PROVIDER_NOT_FOUND' } });
+        expect(prismaMock.emailAccount.update).not.toHaveBeenCalled();
+      });
+    });
 
     it('no revalida IMAP si no cambian credenciales', async () => {
       prismaMock.emailAccount.findFirst.mockResolvedValue(existingAccount);

@@ -26,6 +26,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "seed:superadmin": "ts-node scripts/seed-superadmin.ts",
+    "seed:mail-providers": "ts-node scripts/seed-mail-providers.ts",
     "migrate:to-multitenant": "ts-node scripts/migrate-to-multitenant.ts"
   },
   "dependencies": {

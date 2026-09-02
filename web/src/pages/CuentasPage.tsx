@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 
 import { apiDelete, apiPost, ApiError } from '@/lib/api-client';
 import { formatRelativeTime } from '@/lib/format';
+import { formatAccountEndpoint } from '@/lib/imap-endpoint';
 import { useAccountsStore } from '@/stores/accounts-store';
 import { useAccounts } from '@/hooks/useAccounts';
 import type { SafeAccount, TriggerSyncResult } from '@/types/domain';
@@ -145,7 +146,10 @@ export function CuentasPage() {
                   <TableCell className="font-medium">{account.alias}</TableCell>
                   <TableCell className="text-muted-foreground">{account.email}</TableCell>
                   <TableCell className="text-muted-foreground">
-                    {account.imapHost}:{account.imapPort}
+                    <span>{formatAccountEndpoint(account)}</span>
+                    {account.provider && (
+                      <span className="block text-xs">{account.provider.name}</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <AccountStatusBadge status={account.status} lastError={account.lastError} />

@@ -11,6 +11,7 @@ import { DashboardPage } from '@/pages/DashboardPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { OrganizacionesPage } from '@/pages/OrganizacionesPage';
+import { ServiciosCorreoPage } from '@/pages/ServiciosCorreoPage';
 
 // react-router no matchea rutas si el basename trae "/" final; BASE_URL de
 // Vite (config `base: '/panel/'`) sí lo trae.
@@ -32,6 +33,7 @@ function App() {
             </Route>
             <Route element={<SuperadminRoute />}>
               <Route path="organizaciones" element={<OrganizacionesPage />} />
+              <Route path="servicios-correo" element={<ServiciosCorreoPage />} />
             </Route>
           </Route>
         </Route>

@@ -11,6 +11,17 @@
 - **RF-01.3**: Las cuentas pueden activarse/desactivarse sin eliminarlas; una cuenta inactiva no se sincroniza pero conserva su historial.
 - **RF-01.4**: Las contraseñas se almacenan cifradas con AES-256-GCM; nunca se retornan en ninguna respuesta de la API (write-only).
 - **RF-01.5**: Al eliminar una cuenta se conservan registros y archivos (soft delete); la eliminación física requiere confirmación explícita y es una operación separada.
+- **RF-01.6** *(Addendum 09)*: El host IMAP, el puerto y el uso de TLS pueden provenir de un **perfil del catálogo maestro de servicios de correo** en lugar de cargarse a mano. Una cuenta vinculada a un perfil resuelve esos tres valores contra el catálogo **en cada sincronización** (referencia viva): un cambio del perfil aplica a todas las cuentas vinculadas en su siguiente ronda. Una cuenta sin perfil (`providerId` nulo) es de **servidor personalizado** y usa sus propias columnas. RF-01.1 se lee con esta salvedad: esos tres campos son obligatorios solo en el camino personalizado.
+- **RF-01.7** *(Addendum 09)*: Al ingresar la dirección de correo, el sistema **sugiere** el perfil correspondiente: primero por coincidencia exacta del dominio y, si no hay, por el registro MX del dominio (lo que permite detectar Google Workspace o Microsoft 365 detrás de un dominio propio del cliente). La sugerencia nunca es obligatoria ni bloqueante: siempre se puede cambiar el perfil o cargar un servidor personalizado, y cualquier fallo de la detección (DNS caído, dominio sin MX, caché no disponible) deja el alta funcionando a mano.
+- **RF-01.8** *(Addendum 09)*: Si el usuario reemplaza un perfil detectado sobre un dominio inequívoco (marcado `strict` en el catálogo: gmail.com, outlook.com…), el sistema muestra una advertencia visible que **no impide** guardar.
+
+### RF-09 — Catálogo de servicios de correo *(Addendum 09)*
+- **RF-09.1**: El catálogo es **global**: lo administra exclusivamente el SUPERADMIN y lo consultan todas las organizaciones. No pertenece a ningún tenant.
+- **RF-09.2**: Cada perfil define clave (inmutable), nombre, host IMAP, puerto, TLS, buzón por defecto, orden, si es dominio inequívoco (`strict`), y los textos de ayuda `notes` y `helpUrl` que explican al usuario final el requisito de autenticación (contraseña de aplicación, IMAP habilitado, etc.).
+- **RF-09.3**: Un perfil tiene N dominios de detección, cada uno de tipo `DOMAIN` (dominio del correo) o `MX_SUFFIX` (sufijo del registro MX). Un dominio pertenece a un solo perfil por tipo.
+- **RF-09.4**: Un perfil **referenciado por alguna cuenta no se puede eliminar**, incluidas las cuentas con soft delete, que conservan el vínculo. Para retirarlo del alta sin afectar a las cuentas existentes se lo deshabilita (`active: false`), lo que lo oculta del desplegable sin desvincular nada.
+- **RF-09.5**: Modificar host, puerto o TLS de un perfil en uso exige **confirmar el número exacto de cuentas afectadas**. El sistema informa cuántas cuentas y cuántas organizaciones cambiarán de servidor en su próxima sincronización, y registra el cambio en el log con el usuario que lo hizo.
+- **RF-09.6**: El SUPERADMIN puede verificar que el host y el puerto de un perfil responden como servidor IMAP, sin credenciales. La verificación exige un saludo IMAP válido: un puerto abierto que responde otra cosa se reporta como fallo.
 
 ### RF-02 — Sincronización
 - **RF-02.1**: Un scheduler encola un job de sincronización por cada cuenta activa según su intervalo configurado (por defecto 5 min).

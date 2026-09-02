@@ -5,10 +5,12 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateAccountDto {
@@ -19,17 +21,29 @@ export class CreateAccountDto {
   @IsEmail()
   email!: string;
 
+  /**
+   * Perfil del catálogo maestro (Addendum 09). Si viene, manda el perfil y los
+   * tres campos imap* de abajo se ignoran. Si se omite, la cuenta es de
+   * "servidor personalizado" y esos tres campos pasan a ser obligatorios.
+   */
+  @IsOptional()
+  @IsUUID()
+  providerId?: string;
+
+  @ValidateIf((dto: CreateAccountDto) => dto.providerId === undefined)
   @IsString()
   @MaxLength(255)
-  imapHost!: string;
+  imapHost?: string;
 
+  @ValidateIf((dto: CreateAccountDto) => dto.providerId === undefined)
   @IsInt()
   @Min(1)
   @Max(65535)
-  imapPort!: number;
+  imapPort?: number;
 
+  @ValidateIf((dto: CreateAccountDto) => dto.providerId === undefined)
   @IsBoolean()
-  imapSecure!: boolean;
+  imapSecure?: boolean;
 
   @IsString()
   @MaxLength(255)

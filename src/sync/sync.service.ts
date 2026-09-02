@@ -13,6 +13,7 @@ import { StorageService, SavedAttachment } from '../storage/storage.service';
 import { REDIS_CONNECTION } from '../redis/redis.constants';
 import { ImapClientFactory } from './imap/imap-client.factory';
 import { ImapConnectionError, mapImapError } from './imap/imap-error';
+import { AccountWithProvider, resolveImapEndpoint } from './imap/resolve-imap-endpoint';
 import {
   classifyAttachment,
   isTargetAttachment,
@@ -117,8 +118,14 @@ export class SyncService {
     syncId: string,
     trigger: SyncTrigger,
   ): Promise<void> {
+    // include del perfil (Addendum 09): con providerId, el endpoint efectivo sale
+    // del catálogo en cada corrida — por eso se lee acá y no se cachea. Es el
+    // único punto donde el sync carga la cuenta.
     const account = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.emailAccount.findFirst({ where: { id: accountId, tenantId } }),
+      tx.emailAccount.findFirst({
+        where: { id: accountId, tenantId },
+        include: { provider: true },
+      }),
     );
     if (!account || account.deletedAt || account.status !== 'ACTIVA') {
       this.logger.warn({ accountId, syncId }, 'Cuenta no activa o inexistente, se omite sync');
@@ -170,16 +177,14 @@ export class SyncService {
   }
 
   private async syncMailbox(
-    account: EmailAccount,
+    account: AccountWithProvider,
     tenantSlug: string,
     maxStorageBytes: bigint,
     syncId: string,
     counters: SyncCounters,
   ): Promise<{ hadErrors: boolean }> {
     const client = this.imap.create({
-      imapHost: account.imapHost,
-      imapPort: account.imapPort,
-      imapSecure: account.imapSecure,
+      ...resolveImapEndpoint(account),
       imapUser: account.imapUser,
       imapPassword: this.aes.decrypt(account.imapPassEnc),
     });

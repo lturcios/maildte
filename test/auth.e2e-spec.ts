@@ -185,4 +185,64 @@ describe('Auth (e2e)', () => {
       expect(res.status).toBe(403);
     });
   });
+
+  /**
+   * Regresión de la migración fix_superadmin_rls_null_tenant.
+   *
+   * Las políticas de RLS de `users` identificaban al SUPERADMIN con
+   * `current_setting('app.tenant_id', true) IS NULL`. Cuando una conexión del
+   * pool ya había atendido un request con tenant, Postgres dejaba esa GUC en
+   * string vacío en vez de eliminarla: la fila del SUPERADMIN se volvía
+   * invisible para UPDATE y el login moría con 500 al escribir
+   * currentRefreshTokenHash.
+   *
+   * No se puede cubrir con un unit test: es comportamiento del motor, no de la
+   * aplicación. Por eso vive acá, contra Postgres real.
+   */
+  describe('SUPERADMIN sobre conexiones que ya sirvieron a un tenant', () => {
+    it('el login sigue funcionando después de requests con tenant en contexto', async () => {
+      const superadmin = await seedUser(seedPrisma, null, 'SUPERADMIN');
+      const tenant = await seedTenant(seedPrisma);
+      const admin = await seedUser(seedPrisma, tenant.id, 'ADMIN');
+
+      // Ensucia el pool: cada login de un usuario de tenant corre un
+      // withTenant() y deja app.tenant_id en string vacío al terminar.
+      for (let i = 0; i < 5; i += 1) {
+        await request(app.getHttpServer())
+          .post('/api/v1/auth/login')
+          .send({ email: admin.email, password: admin.password });
+      }
+
+      // Varios intentos para no depender de qué conexión del pool toque.
+      for (let i = 0; i < 5; i += 1) {
+        const res = await request(app.getHttpServer())
+          .post('/api/v1/auth/login')
+          .send({ email: superadmin.email, password: superadmin.password });
+
+        expect(res.status).toBe(200);
+        expect(typeof res.body.data.accessToken).toBe('string');
+      }
+    });
+
+    it('un ADMIN de tenant sigue sin poder tocar usuarios de otro tenant', async () => {
+      // El fix no debe ampliar lo que ve nadie: solo devolverle al SUPERADMIN
+      // el acceso a su propia fila.
+      const tenantA = await seedTenant(seedPrisma);
+      const adminA = await seedUser(seedPrisma, tenantA.id, 'ADMIN');
+      const tenantB = await seedTenant(seedPrisma);
+      const miembroB = await seedUser(seedPrisma, tenantB.id, 'MIEMBRO');
+
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: adminA.email, password: adminA.password });
+      const accessToken = loginRes.body.data.accessToken as string;
+
+      const res = await request(app.getHttpServer())
+        .patch(`/api/v1/users/${miembroB.id}`)
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ name: 'No debería poder' });
+
+      expect(res.status).toBe(404);
+    });
+  });
 });

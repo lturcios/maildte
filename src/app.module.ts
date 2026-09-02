@@ -15,6 +15,7 @@ import { ExportModule } from './export/export.module';
 import { UsersModule } from './users/users.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AdminModule } from './admin/admin.module';
+import { MailProvidersModule } from './mail-providers/mail-providers.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { AdminModule } from './admin/admin.module';
     UsersModule,
     ApiKeysModule,
     AdminModule,
+    MailProvidersModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

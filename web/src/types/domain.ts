@@ -20,6 +20,121 @@ export type EmailStatus = 'PROCESADO' | 'SIN_ADJUNTOS' | 'ERROR';
 export type SyncStatus = 'EJECUTANDO' | 'COMPLETADO' | 'COMPLETADO_CON_ERRORES' | 'ERROR';
 export type AttachmentFileType = 'JSON' | 'PDF';
 
+/**
+ * Catálogo maestro de servicios de correo (Addendum 09).
+ * Fuentes: src/mail-providers/mail-providers.service.ts (PROVIDER_SELECT) y
+ * src/accounts/accounts.service.ts (SAFE_PROVIDER_SELECT).
+ */
+export type DomainMatchKind = 'DOMAIN' | 'MX_SUFFIX';
+
+export interface MailProviderDomain {
+  id: string;
+  domain: string;
+  kind: DomainMatchKind;
+}
+
+/** Forma del perfil tal como viene anidado dentro de una cuenta (sin dominios). */
+export interface AccountMailProvider {
+  id: string;
+  key: string;
+  name: string;
+  imapHost: string;
+  imapPort: number;
+  imapSecure: boolean;
+  defaultMailbox: string;
+  /** Dominio obvio: advertir si el usuario cambia el perfil detectado. */
+  strict: boolean;
+  /** Requisito de autenticación en lenguaje del usuario (contraseña de aplicación, etc.). */
+  notes: string | null;
+  helpUrl: string | null;
+  active: boolean;
+}
+
+/** Forma completa del perfil en el catálogo (GET /mail-providers). */
+export interface MailProvider extends AccountMailProvider {
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  domains: MailProviderDomain[];
+}
+
+/**
+ * Respuesta de GET /mail-providers/resolve?email=. `source` indica cómo se
+ * llegó al perfil: por el dominio del correo, por el registro MX del dominio
+ * propio, o null si no se pudo inferir (el usuario elige a mano).
+ */
+export interface ResolveProviderResult {
+  provider: MailProvider | null;
+  source: 'DOMAIN' | 'MX' | null;
+}
+
+/**
+ * Administración del catálogo, exclusiva de SUPERADMIN.
+ * Fuente: src/mail-providers/admin-mail-providers.controller.ts y dto/*.ts.
+ */
+export interface MailProviderDomainInput {
+  domain: string;
+  kind: DomainMatchKind;
+}
+
+/** Body de POST /admin/mail-providers. `key` es inmutable tras la creación. */
+export interface CreateMailProviderInput {
+  key: string;
+  name: string;
+  imapHost: string;
+  imapPort: number;
+  imapSecure: boolean;
+  defaultMailbox?: string;
+  strict?: boolean;
+  notes?: string;
+  helpUrl?: string;
+  active?: boolean;
+  sortOrder?: number;
+  domains?: MailProviderDomainInput[];
+}
+
+/**
+ * Body de PATCH /admin/mail-providers/:id. Sin `key`: es inmutable.
+ * `domains`, si viene, REEMPLAZA la lista completa.
+ */
+export interface UpdateMailProviderInput {
+  name?: string;
+  imapHost?: string;
+  imapPort?: number;
+  imapSecure?: boolean;
+  defaultMailbox?: string;
+  strict?: boolean;
+  notes?: string;
+  helpUrl?: string;
+  active?: boolean;
+  sortOrder?: number;
+  domains?: MailProviderDomainInput[];
+  /**
+   * Obligatorio para cambiar host/puerto/TLS de un perfil en uso: como el
+   * vínculo es una referencia viva, el cambio se aplica en caliente a todos los
+   * tenants en su siguiente sincronización (ADR-09.1).
+   */
+  confirmAffectedAccounts?: number;
+}
+
+/** Respuesta de GET /admin/mail-providers/:id/usage. */
+export interface MailProviderUsage {
+  /** Todas las cuentas vinculadas, incluidas las eliminadas por soft delete. */
+  accounts: number;
+  activeAccounts: number;
+  /** Cuentas eliminadas que conservan el vínculo: también impiden el borrado. */
+  deletedAccounts: number;
+  tenants: number;
+}
+
+/** Respuesta de GET /admin/mail-providers/usage: uso de todos los perfiles. */
+export type MailProviderUsageMap = Record<string, MailProviderUsage>;
+
+/** Respuesta de POST /admin/mail-providers/:id/probe. */
+export type MailProviderProbeResult =
+  | { reachable: true; latencyMs: number; greeting: string }
+  | { reachable: false; latencyMs: number; reason: string };
+
 /** Nunca incluye `imapPassEnc`: el backend proyecta explícitamente esta forma. */
 export interface SafeAccount {
   id: string;
@@ -27,6 +142,14 @@ export interface SafeAccount {
   alias: string;
   email: string;
   folderName: string;
+  /**
+   * Vínculo con el catálogo (Addendum 09). Con perfil, el endpoint vigente es
+   * el de `provider` y las tres columnas imap* de abajo son solo el último
+   * valor escrito. Con `providerId: null`, la cuenta es de servidor
+   * personalizado y esas columnas SÍ son la configuración vigente.
+   */
+  providerId: string | null;
+  provider: AccountMailProvider | null;
   imapHost: string;
   imapPort: number;
   imapSecure: boolean;
@@ -51,9 +174,15 @@ export interface SafeAccount {
 export interface CreateAccountInput {
   alias: string;
   email: string;
-  imapHost: string;
-  imapPort: number;
-  imapSecure: boolean;
+  /**
+   * Con `providerId`, el backend toma host/puerto/TLS del catálogo y los tres
+   * campos imap* de abajo se ignoran (por eso son opcionales). Sin él, la
+   * cuenta es de servidor personalizado y los tres pasan a ser obligatorios.
+   */
+  providerId?: string;
+  imapHost?: string;
+  imapPort?: number;
+  imapSecure?: boolean;
   imapUser: string;
   imapPassword: string;
   mailbox?: string;
@@ -76,6 +205,11 @@ export interface ResyncAccountInput {
 export interface UpdateAccountInput {
   alias?: string;
   email?: string;
+  /**
+   * Ausente no toca el vínculo; un id lo cambia; `null` desvincula y la cuenta
+   * pasa a servidor personalizado (ver UpdateAccountDto del backend).
+   */
+  providerId?: string | null;
   imapHost?: string;
   imapPort?: number;
   imapSecure?: boolean;

@@ -42,6 +42,11 @@ enum SyncStatus {
   ERROR
 }
 
+enum DomainMatchKind {
+  DOMAIN // dominio del correo: gmail.com
+  MX_SUFFIX // sufijo del registro MX: google.com
+}
+
 model Tenant {
   id              String       @id @default(uuid())
   name            String
@@ -96,13 +101,71 @@ model TenantApiKey {
   @@map("tenant_api_keys")
 }
 
+/// Catálogo maestro global de servicios de correo (Addendum 09). Sin tenantId:
+/// es público a todos los tenants y solo SUPERADMIN lo escribe. Deliberadamente
+/// SIN RLS — ver el comentario de la migración mail_providers.
+model MailProvider {
+  id             String  @id @default(uuid())
+  key            String  @unique // "gmail", "microsoft365"
+  name           String // "Gmail / Google Workspace"
+  imapHost       String
+  imapPort       Int     @default(993)
+  imapSecure     Boolean @default(true)
+  defaultMailbox String  @default("INBOX")
+  /// Dominio obvio (gmail.com, outlook.com): advertir si el usuario cambia el
+  /// perfil detectado automáticamente por otro (ADR-09.1).
+  strict         Boolean @default(false)
+  /// Requisitos de autenticación en lenguaje del usuario ("necesitás una
+  /// contraseña de aplicación"). Es lo que evita la mayoría de los tickets.
+  notes          String?
+  helpUrl        String?
+  /// false = oculto del desplegable de alta. NO desvincula cuentas existentes:
+  /// es el mecanismo de retiro de un perfil, en vez del DELETE (ADR-09.1).
+  active         Boolean @default(true)
+  sortOrder      Int     @default(100)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  domains  MailProviderDomain[]
+  accounts EmailAccount[]
+
+  @@map("mail_providers")
+}
+
+/// Dominios que resuelven a un perfil, por coincidencia exacta del dominio del
+/// correo (DOMAIN) o por sufijo del registro MX (MX_SUFFIX, ADR-09.3).
+model MailProviderDomain {
+  id         String          @id @default(uuid())
+  providerId String
+  provider   MailProvider    @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  domain     String
+  kind       DomainMatchKind @default(DOMAIN)
+  createdAt  DateTime        @default(now())
+
+  // La unicidad es por (kind, domain), no por domain solo: "outlook.com" existe
+  // como dominio de correo personal Y como sufijo MX de Microsoft 365.
+  @@unique([kind, domain])
+  @@index([providerId])
+  @@map("mail_provider_domains")
+}
+
 model EmailAccount {
-  id           String        @id @default(uuid())
-  tenantId     String
-  tenant       Tenant        @relation(fields: [tenantId], references: [id])
-  alias        String // "Compras Casa Matriz"
-  email        String // compras@ltsoft.us
-  folderName   String // compras_ltsoft_us (normalizado)
+  id         String @id @default(uuid())
+  tenantId   String
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  alias      String // "Compras Casa Matriz"
+  email      String // compras@ltsoft.us
+  folderName String // compras_ltsoft_us (normalizado)
+
+  /// ADR-09.1/09.2 — referencia viva: con providerId, el endpoint efectivo sale
+  /// del perfil en cada sync (un cambio del SUPERADMIN aplica en la siguiente
+  /// ronda). Con providerId NULL, mandan las tres columnas imap* de abajo:
+  /// ese es el camino "servidor personalizado". Resolución en un solo lugar:
+  /// src/sync/imap/resolve-imap-endpoint.ts
+  providerId String?
+  provider   MailProvider? @relation(fields: [providerId], references: [id], onDelete: Restrict)
+
   imapHost     String
   imapPort     Int           @default(993)
   imapSecure   Boolean       @default(true)
@@ -126,6 +189,7 @@ model EmailAccount {
   @@unique([tenantId, email])
   @@unique([tenantId, folderName])
   @@index([tenantId])
+  @@index([providerId])
   @@map("email_accounts")
 }
 

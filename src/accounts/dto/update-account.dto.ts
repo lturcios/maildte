@@ -5,10 +5,12 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 
 export class UpdateAccountDto {
@@ -20,6 +22,17 @@ export class UpdateAccountDto {
   @IsOptional()
   @IsEmail()
   email?: string;
+
+  /**
+   * Perfil del catálogo maestro (Addendum 09). Tres casos distintos, por eso
+   * NO lleva @IsOptional() (que trataría null y undefined igual):
+   * - ausente  -> no se toca el vínculo actual
+   * - un UUID  -> se vincula a ese perfil
+   * - null     -> se desvincula y la cuenta pasa a "servidor personalizado"
+   */
+  @ValidateIf((dto: UpdateAccountDto) => dto.providerId !== undefined && dto.providerId !== null)
+  @IsUUID()
+  providerId?: string | null;
 
   @IsOptional()
   @IsString()
