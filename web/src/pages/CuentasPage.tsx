@@ -12,6 +12,16 @@ import { AccountFormDialog } from '@/components/accounts/AccountFormDialog';
 import { ResyncDialog } from '@/components/accounts/ResyncDialog';
 import { AccountStatusBadge } from '@/components/common/StatusBadges';
 import {
+  RecordCard,
+  RecordCardActions,
+  RecordCardEmpty,
+  RecordCardField,
+  RecordCardFields,
+  RecordCardHeader,
+  RecordCardList,
+  RecordCardSkeletons,
+} from '@/components/common/RecordCard';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -63,6 +73,12 @@ export function CuentasPage() {
     }
   }
 
+  function syncDisabledReason(account: SafeAccount, action: string): string {
+    return account.status !== 'ACTIVA'
+      ? `La cuenta está ${account.status.toLowerCase()} y no puede ${action}`
+      : '';
+  }
+
   async function handleSyncNow(account: SafeAccount) {
     setSyncingId(account.id);
     try {
@@ -97,15 +113,15 @@ export function CuentasPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="flex flex-col gap-4 md:gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Cuentas</h1>
+          <h1 className="text-xl font-semibold md:text-2xl">Cuentas</h1>
           <p className="text-sm text-muted-foreground">
             Cuentas IMAP conectadas al pipeline de sincronización de DTE.
           </p>
         </div>
-        <Button type="button" onClick={openCreateDialog}>
+        <Button type="button" className="w-full sm:w-auto" onClick={openCreateDialog}>
           <PlusIcon className="size-4" aria-hidden="true" />
           Nueva cuenta
         </Button>
@@ -113,7 +129,91 @@ export function CuentasPage() {
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      <div className="rounded-md border border-border">
+      {/* Mobile: una card por cuenta. Las cuatro acciones pasan de iconos sueltos
+          en una celda a botones con etiqueta y ancho repartido al pie. */}
+      <div className="md:hidden">
+        {loading ? (
+          <RecordCardSkeletons count={3} />
+        ) : accounts.length === 0 ? (
+          <RecordCardEmpty>Todavía no hay cuentas registradas.</RecordCardEmpty>
+        ) : (
+          <RecordCardList>
+            {accounts.map((account) => (
+              <RecordCard key={account.id}>
+                <RecordCardHeader
+                  title={account.alias}
+                  subtitle={account.email}
+                  aside={
+                    <AccountStatusBadge status={account.status} lastError={account.lastError} />
+                  }
+                />
+
+                <RecordCardFields>
+                  <RecordCardField label="Servidor IMAP">
+                    <span className="block truncate">{formatAccountEndpoint(account)}</span>
+                    {account.provider && (
+                      <span className="block truncate text-xs text-muted-foreground">
+                        {account.provider.name}
+                      </span>
+                    )}
+                  </RecordCardField>
+                  <RecordCardField label="Última sincronización">
+                    {account.lastSyncAt ? formatRelativeTime(account.lastSyncAt) : 'Nunca'}
+                  </RecordCardField>
+                </RecordCardFields>
+
+                <RecordCardActions>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    title={syncDisabledReason(account, 'sincronizarse manualmente')}
+                    disabled={account.status !== 'ACTIVA' || syncingId === account.id}
+                    onClick={() => void handleSyncNow(account)}
+                  >
+                    <RefreshCwIcon
+                      className={syncingId === account.id ? 'size-4 animate-spin' : 'size-4'}
+                      aria-hidden="true"
+                    />
+                    Sincronizar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    title={syncDisabledReason(account, 're-sincronizarse')}
+                    disabled={account.status !== 'ACTIVA'}
+                    onClick={() => setResyncingAccount(account)}
+                  >
+                    <CalendarClockIcon className="size-4" aria-hidden="true" />
+                    Re-sincronizar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openEditDialog(account)}
+                  >
+                    <PencilIcon className="size-4" aria-hidden="true" />
+                    Editar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setDeletingAccount(account)}
+                  >
+                    <Trash2Icon className="size-4 text-destructive" aria-hidden="true" />
+                    Eliminar
+                  </Button>
+                </RecordCardActions>
+              </RecordCard>
+            ))}
+          </RecordCardList>
+        )}
+      </div>
+
+      <div className="hidden rounded-md border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -164,9 +264,8 @@ export function CuentasPage() {
                         variant="ghost"
                         size="icon"
                         title={
-                          account.status !== 'ACTIVA'
-                            ? `La cuenta está ${account.status.toLowerCase()} y no puede sincronizarse manualmente`
-                            : 'Sincronizar ahora'
+                          syncDisabledReason(account, 'sincronizarse manualmente') ||
+                          'Sincronizar ahora'
                         }
                         disabled={account.status !== 'ACTIVA' || syncingId === account.id}
                         onClick={() => void handleSyncNow(account)}
@@ -182,9 +281,8 @@ export function CuentasPage() {
                         variant="ghost"
                         size="icon"
                         title={
-                          account.status !== 'ACTIVA'
-                            ? `La cuenta está ${account.status.toLowerCase()} y no puede re-sincronizarse`
-                            : 'Re-sincronizar desde fecha'
+                          syncDisabledReason(account, 're-sincronizarse') ||
+                          'Re-sincronizar desde fecha'
                         }
                         disabled={account.status !== 'ACTIVA'}
                         onClick={() => setResyncingAccount(account)}

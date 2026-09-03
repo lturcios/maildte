@@ -12,7 +12,11 @@ RUN apk add --no-cache python3 make g++
 RUN corepack enable
 WORKDIR /app
 
+# prisma/ se copia ANTES del install: el postinstall del proyecto corre
+# `prisma generate` y necesita el schema. No se usa --ignore-scripts para
+# saltearlo porque eso también saltearía la compilación nativa de argon2.
 COPY package.json pnpm-lock.yaml ./
+COPY prisma ./prisma
 RUN pnpm install --frozen-lockfile
 
 # =====================================================================

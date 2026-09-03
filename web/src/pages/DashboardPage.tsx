@@ -24,16 +24,18 @@ interface StatCardProps {
 function StatCard({ icon: Icon, label, value }: StatCardProps) {
   return (
     <Card>
-      <CardContent className="flex items-center gap-4 p-4">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
-          <Icon className="size-5" aria-hidden="true" />
+      {/* En mobile el icono se apila sobre el dato: en 2 columnas de ~160px la
+          fila icono+texto obliga a truncar valores como "1.2 GB". */}
+      <CardContent className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:gap-4 sm:p-4">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary sm:size-10">
+          <Icon className="size-4 sm:size-5" aria-hidden="true" />
         </div>
-        <div className="flex flex-col gap-1">
+        <div className="flex min-w-0 flex-col gap-1">
           <span className="text-xs text-muted-foreground">{label}</span>
           {value === null ? (
             <Skeleton className="h-6 w-16" />
           ) : (
-            <span className="text-xl font-semibold">{value}</span>
+            <span className="truncate text-lg font-semibold sm:text-xl">{value}</span>
           )}
         </div>
       </CardContent>
@@ -90,15 +92,15 @@ export function DashboardPage() {
   const isLoading = loading || accountsLoading;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4 md:gap-6">
       <div>
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <h1 className="text-xl font-semibold md:text-2xl">Dashboard</h1>
         <p className="text-sm text-muted-foreground">
           Resumen operativo de sincronización de todas las cuentas del tenant.
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <StatCard
           icon={MailIcon}
           label="Correos totales"

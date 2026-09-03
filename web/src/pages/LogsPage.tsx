@@ -7,7 +7,17 @@ import { formatDateTime, formatRelativeTime } from '@/lib/format';
 import { useAccounts } from '@/hooks/useAccounts';
 import type { Paginated, SyncLog } from '@/types/domain';
 import { SyncStatusBadge } from '@/components/common/StatusBadges';
+import { FiltersPanel } from '@/components/common/FiltersPanel';
 import { Pagination } from '@/components/common/Pagination';
+import {
+  RecordCard,
+  RecordCardEmpty,
+  RecordCardField,
+  RecordCardFields,
+  RecordCardHeader,
+  RecordCardList,
+  RecordCardSkeletons,
+} from '@/components/common/RecordCard';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -51,6 +61,10 @@ function buildQuery(filters: Filters, page: number): string {
   params.set('page', String(page));
   params.set('limit', String(LIMIT));
   return params.toString();
+}
+
+function countActiveFilters(filters: Filters): number {
+  return [filters.accountId !== 'all', filters.status !== 'all'].filter(Boolean).length;
 }
 
 export function LogsPage() {
@@ -126,10 +140,10 @@ export function LogsPage() {
   }, []);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="flex flex-col gap-4 md:gap-6">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Logs</h1>
+          <h1 className="text-xl font-semibold md:text-2xl">Logs</h1>
           <p className="text-sm text-muted-foreground">
             Registro auditable de corridas de sincronización, por cuenta.
           </p>
@@ -143,7 +157,11 @@ export function LogsPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 rounded-md border border-border bg-card p-4 sm:grid-cols-2">
+      <FiltersPanel
+        activeCount={countActiveFilters(filters)}
+        onClear={() => setFilters(DEFAULT_FILTERS)}
+        gridClassName="sm:grid-cols-2"
+      >
         <div className="flex flex-col gap-2">
           <Label>Cuenta</Label>
           <Select
@@ -182,9 +200,46 @@ export function LogsPage() {
             </SelectContent>
           </Select>
         </div>
+      </FiltersPanel>
+
+      {/* Mobile: los cuatro contadores de la corrida pasan de cuatro columnas
+          numéricas a una grilla 2x2 etiquetada dentro de la card. */}
+      <div className="md:hidden">
+        {loading ? (
+          <RecordCardSkeletons count={5} />
+        ) : logs.length === 0 ? (
+          <RecordCardEmpty>
+            No hay corridas de sincronización que coincidan con los filtros.
+          </RecordCardEmpty>
+        ) : (
+          <RecordCardList>
+            {logs.map((log) => (
+              <RecordCard key={log.id}>
+                <RecordCardHeader
+                  title={getAlias(log.accountId)}
+                  subtitle={`${log.trigger === 'manual' ? 'Manual' : 'Programado'} · ${formatDateTime(log.startedAt)}`}
+                  aside={<SyncStatusBadge status={log.status} />}
+                />
+
+                {log.errorDetail && <p className="text-xs text-destructive">{log.errorDetail}</p>}
+
+                <RecordCardFields columns={2}>
+                  <RecordCardField label="Encontrados">{log.emailsFound}</RecordCardField>
+                  <RecordCardField label="Procesados">{log.emailsProcessed}</RecordCardField>
+                  <RecordCardField label="Omitidos">{log.emailsSkipped}</RecordCardField>
+                  <RecordCardField label="Archivos">{log.filesDownloaded}</RecordCardField>
+                </RecordCardFields>
+
+                <span className="text-xs text-muted-foreground">
+                  Finalizado: {formatDateTime(log.finishedAt)}
+                </span>
+              </RecordCard>
+            ))}
+          </RecordCardList>
+        )}
       </div>
 
-      <div className="rounded-md border border-border">
+      <div className="hidden rounded-md border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>

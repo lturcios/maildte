@@ -3,6 +3,7 @@ import { Attachment, Prisma, ProcessedEmail } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenancy/tenant-context';
 import { ListEmailsDto } from './dto/list-emails.dto';
+import { rangeEnd, rangeStart } from '../common/utils/date-range';
 
 export interface Paginated<T> {
   data: T[];
@@ -73,11 +74,13 @@ export class EmailsService {
       tenantId,
       ...(dto.accountId ? { accountId: dto.accountId } : {}),
       ...(dto.status ? { status: dto.status } : {}),
+      // `from`/`to` llegan como `YYYY-MM-DD` desde el panel: se expanden al día
+      // UTC completo, si no un `lte '2026-03-31'` descartaría todo el día 31.
       ...(dto.from || dto.to
         ? {
             receivedAt: {
-              ...(dto.from ? { gte: new Date(dto.from) } : {}),
-              ...(dto.to ? { lte: new Date(dto.to) } : {}),
+              ...(dto.from ? { gte: rangeStart(dto.from) } : {}),
+              ...(dto.to ? { lte: rangeEnd(dto.to) } : {}),
             },
           }
         : {}),

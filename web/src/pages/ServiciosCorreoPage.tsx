@@ -8,6 +8,16 @@ import { useMailProvidersStore } from '@/stores/mail-providers-store';
 import type { MailProvider, MailProviderProbeResult } from '@/types/domain';
 import { MailProviderFormDialog } from '@/components/mail-providers/MailProviderFormDialog';
 import {
+  RecordCard,
+  RecordCardActions,
+  RecordCardEmpty,
+  RecordCardField,
+  RecordCardFields,
+  RecordCardHeader,
+  RecordCardList,
+  RecordCardSkeletons,
+} from '@/components/common/RecordCard';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -127,17 +137,30 @@ export function ServiciosCorreoPage() {
   const deletingUsage = deletingProvider ? usage[deletingProvider.id] : undefined;
   const deletingInUse = (deletingUsage?.accounts ?? 0) > 0;
 
+  function domainsSummary(provider: MailProvider): string {
+    if (provider.domains.length === 0) {
+      return 'Sin detección';
+    }
+    const domains = provider.domains.filter((d) => d.kind === 'DOMAIN').length;
+    const mx = provider.domains.filter((d) => d.kind === 'MX_SUFFIX').length;
+    return `${domains} dominio(s), ${mx} MX`;
+  }
+
+  function endpointOf(provider: MailProvider): string {
+    return `${provider.imapHost}:${provider.imapPort}${provider.imapSecure ? '' : ' (sin TLS)'}`;
+  }
+
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="flex flex-col gap-4 md:gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Servicios de correo</h1>
+          <h1 className="text-xl font-semibold md:text-2xl">Servicios de correo</h1>
           <p className="text-sm text-muted-foreground">
             Catálogo compartido por todas las organizaciones: evita que cada cliente tenga que
             escribir servidor, puerto y TLS al dar de alta una cuenta.
           </p>
         </div>
-        <Button type="button" onClick={openCreateDialog}>
+        <Button type="button" className="w-full sm:w-auto" onClick={openCreateDialog}>
           <PlusIcon className="size-4" aria-hidden="true" />
           Nuevo servicio
         </Button>
@@ -145,7 +168,89 @@ export function ServiciosCorreoPage() {
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      <div className="rounded-md border border-border">
+      {/* Mobile: card por servicio. El uso (cuentas/organizaciones) sube a campo
+          propio en vez de una celda comprimida: es el dato que decide si tocar
+          el perfil es seguro (ADR-09.1, referencia viva). */}
+      <div className="md:hidden">
+        {loading ? (
+          <RecordCardSkeletons count={4} />
+        ) : providers.length === 0 ? (
+          <RecordCardEmpty>Todavía no hay servicios de correo cargados.</RecordCardEmpty>
+        ) : (
+          <RecordCardList>
+            {providers.map((provider) => {
+              const providerUsage = usage[provider.id];
+              const accounts = providerUsage?.accounts ?? 0;
+
+              return (
+                <RecordCard key={provider.id}>
+                  <RecordCardHeader
+                    title={provider.name}
+                    subtitle={<span className="font-mono">{provider.key}</span>}
+                    aside={
+                      <Badge variant={provider.active ? 'default' : 'secondary'}>
+                        {provider.active ? 'Habilitado' : 'Deshabilitado'}
+                      </Badge>
+                    }
+                  />
+
+                  {provider.strict && <Badge variant="outline">Dominio obvio</Badge>}
+
+                  <RecordCardFields>
+                    <RecordCardField label="Servidor">
+                      <span className="font-mono text-xs">{endpointOf(provider)}</span>
+                    </RecordCardField>
+                    <RecordCardField label="Dominios">{domainsSummary(provider)}</RecordCardField>
+                    <RecordCardField label="En uso">
+                      {accounts === 0
+                        ? 'Sin uso'
+                        : `${accounts} cuenta(s) · ${providerUsage?.tenants ?? 0} organización(es)`}
+                    </RecordCardField>
+                  </RecordCardFields>
+
+                  <RecordCardActions>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={probingId === provider.id}
+                      onClick={() => void handleProbe(provider)}
+                    >
+                      <PlugZapIcon className="size-4" aria-hidden="true" />
+                      Probar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openEditDialog(provider)}
+                    >
+                      <PencilIcon className="size-4" aria-hidden="true" />
+                      Editar
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      title={
+                        accounts > 0
+                          ? `No se puede borrar: lo usan ${accounts} cuenta(s)`
+                          : undefined
+                      }
+                      onClick={() => setDeletingProvider(provider)}
+                    >
+                      <Trash2Icon className="size-4 text-destructive" aria-hidden="true" />
+                      Eliminar
+                    </Button>
+                  </RecordCardActions>
+                </RecordCard>
+              );
+            })}
+          </RecordCardList>
+        )}
+      </div>
+
+      <div className="hidden rounded-md border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -186,13 +291,10 @@ export function ServiciosCorreoPage() {
                       </span>
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">
-                      {provider.imapHost}:{provider.imapPort}
-                      {provider.imapSecure ? '' : ' (sin TLS)'}
+                      {endpointOf(provider)}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {provider.domains.length === 0
-                        ? 'Sin detección'
-                        : `${provider.domains.filter((d) => d.kind === 'DOMAIN').length} dominio(s), ${provider.domains.filter((d) => d.kind === 'MX_SUFFIX').length} MX`}
+                      {domainsSummary(provider)}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">

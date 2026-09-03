@@ -194,9 +194,32 @@ igual que `seed:superadmin` de la sección 1. Es idempotente: se re-ejecuta cada
 vez que se agreguen proveedores nuevos.
 
 ```bash
+cd /opt/maildte
+pnpm install          # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate   # explícito, por si el postinstall no corrió
+
 APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte \
 pnpm run seed:mail-providers
 ```
+
+> **Por qué el `prisma generate` del host.** Los scripts de `scripts/` corren
+> con el `node_modules` de la máquina, no con el del contenedor. El cliente
+> Prisma es **código generado a partir del schema**: si no se regenera después
+> de un `git pull` que cambió `schema.prisma`, el script falla al compilar con
+> `Property 'mailProvider' does not exist on type 'PrismaClient'`. Los
+> contenedores no tienen este problema: el `Dockerfile` genera el cliente
+> durante el build.
+>
+> El proyecto declara un `postinstall` propio que lo resuelve. No alcanza con el
+> postinstall de `@prisma/client`: pnpm 10 bloquea los scripts de dependencias
+> salvo que estén en una lista de permitidos, y esa lista cambió de lugar entre
+> versiones de pnpm — si al instalar ves
+> `[WARN] The "pnpm" field in package.json is no longer read by pnpm`, estás en
+> esa situación. El `prisma generate` explícito de arriba cubre el caso igual.
+>
+> Ese mismo WARN implica que **argon2 tampoco se compila** en el host. No afecta
+> a este paso, pero sí a `seed:superadmin` (sección 1): si lo necesitás y falla,
+> ejecutá `pnpm rebuild argon2`.
 
 Deja 9 perfiles y 26 dominios de detección (Gmail/Workspace, Microsoft 365,
 Yahoo, iCloud, Zoho, GoDaddy, Namecheap, Hostinger, Rackspace).

@@ -11,6 +11,7 @@ import { StorageService } from '../storage/storage.service';
 import { TenantContext } from '../common/tenancy/tenant-context';
 import { ExportManifestDto } from './dto/export-manifest.dto';
 import { ExportArchiveDto } from './dto/export-archive.dto';
+import { rangeEnd, rangeStart } from '../common/utils/date-range';
 
 export interface ManifestEntry {
   attachmentId: string;
@@ -50,6 +51,64 @@ type AttachmentRow = Prisma.AttachmentGetPayload<{ select: typeof ATTACHMENT_SEL
 const INVALID_CURSOR = { error: 'INVALID_CURSOR', message: 'El cursor indicado no existe' };
 const ACCOUNT_NOT_FOUND = { error: 'ACCOUNT_NOT_FOUND', message: 'Cuenta no encontrada' };
 
+/** Filtros de alcance de una exportación. Ver ExportManifestDto / ExportArchiveDto. */
+export interface ExportScope {
+  accountId: string;
+  /** Cursor de archivado: `Attachment.createdAt`. Instante exacto, no se normaliza. */
+  since?: string;
+  until?: string;
+  /** Rango de recepción del correo: `ProcessedEmail.receivedAt`. Una fecha sola cubre el día entero. */
+  receivedFrom?: string;
+  receivedTo?: string;
+  /** Atajo por carpeta mensual (`ProcessedEmail.monthFolder`), derivada también de receivedAt. */
+  month?: string;
+}
+
+/**
+ * Traduce el alcance de exportación a un `where` de Attachment.
+ *
+ * Hay DOS ejes de tiempo y no son intercambiables:
+ * - `since`/`until` → `Attachment.createdAt`, el instante en que el archivo se
+ *   archivó en disco. Es el cursor incremental del CLI maildte-pull (RF-07.1,
+ *   RF-07.8): su semántica no puede cambiar.
+ * - `receivedFrom`/`receivedTo` → `ProcessedEmail.receivedAt`, la fecha en que
+ *   llegó el correo. Es lo que el usuario filtra en el panel de Correos, y lo
+ *   mismo de lo que se deriva `monthFolder`.
+ *
+ * Mezclarlos es lo que hacía que un rango de recepción (marzo) devolviera cero
+ * archivos cuando la sincronización se había corrido meses después (agosto).
+ */
+export function buildExportWhere(
+  tenantId: string,
+  scope: ExportScope,
+): Prisma.AttachmentWhereInput {
+  const emailWhere: Prisma.ProcessedEmailWhereInput = {
+    accountId: scope.accountId,
+    ...(scope.month ? { monthFolder: scope.month } : {}),
+    ...(scope.receivedFrom || scope.receivedTo
+      ? {
+          receivedAt: {
+            ...(scope.receivedFrom ? { gte: rangeStart(scope.receivedFrom) } : {}),
+            ...(scope.receivedTo ? { lte: rangeEnd(scope.receivedTo) } : {}),
+          },
+        }
+      : {}),
+  };
+
+  return {
+    tenantId,
+    email: emailWhere,
+    ...(scope.since || scope.until
+      ? {
+          createdAt: {
+            ...(scope.since ? { gt: new Date(scope.since) } : {}),
+            ...(scope.until ? { lte: new Date(scope.until) } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 @Injectable()
 export class ExportService {
   constructor(
@@ -63,7 +122,7 @@ export class ExportService {
 
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
-      const baseWhere = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
+      const baseWhere = this.buildWhere(tenantId, dto);
       const cursorWhere = await this.resolveCursorWhere(tx, tenantId, dto.cursorId);
       const where: Prisma.AttachmentWhereInput = { ...baseWhere, ...cursorWhere };
 
@@ -107,7 +166,7 @@ export class ExportService {
   /** RF-07.3: todas las filas que matchean el filtro, sin paginar (uso exclusivo del ZIP). */
   async findAllForArchive(ctx: TenantContext, dto: ExportArchiveDto): Promise<AttachmentRow[]> {
     const tenantId = this.requireTenantId(ctx);
-    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
+    const where = this.buildWhere(tenantId, dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
       return tx.attachment.findMany({
@@ -120,7 +179,7 @@ export class ExportService {
 
   async countForArchive(ctx: TenantContext, dto: ExportArchiveDto): Promise<number> {
     const tenantId = this.requireTenantId(ctx);
-    const where = this.buildWhere(tenantId, dto.accountId, dto.since, dto.until, dto.month);
+    const where = this.buildWhere(tenantId, dto);
     return this.prisma.withTenant(tenantId, async (tx) => {
       await this.assertAccountOwnership(tx, tenantId, dto.accountId);
       return tx.attachment.count({ where });
@@ -150,28 +209,8 @@ export class ExportService {
     }
   }
 
-  private buildWhere(
-    tenantId: string,
-    accountId: string,
-    since?: string,
-    until?: string,
-    month?: string,
-  ): Prisma.AttachmentWhereInput {
-    return {
-      tenantId,
-      email: {
-        accountId,
-        ...(month ? { monthFolder: month } : {}),
-      },
-      ...(since || until
-        ? {
-            createdAt: {
-              ...(since ? { gt: new Date(since) } : {}),
-              ...(until ? { lte: new Date(until) } : {}),
-            },
-          }
-        : {}),
-    };
+  private buildWhere(tenantId: string, scope: ExportScope): Prisma.AttachmentWhereInput {
+    return buildExportWhere(tenantId, scope);
   }
 
   private async resolveCursorWhere(

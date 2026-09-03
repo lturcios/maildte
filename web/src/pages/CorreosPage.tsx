@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { ChevronDownIcon, ChevronRightIcon, DownloadIcon } from 'lucide-react';
+import { ChevronDownIcon, ChevronRightIcon, DownloadIcon, PaperclipIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { apiDownload, apiGet, ApiError } from '@/lib/api-client';
@@ -7,7 +7,17 @@ import { formatBytes, formatDateTime } from '@/lib/format';
 import { useAccounts } from '@/hooks/useAccounts';
 import type { Attachment, Paginated, ProcessedEmailWithAttachments } from '@/types/domain';
 import { EmailStatusBadge } from '@/components/common/StatusBadges';
+import { FiltersPanel } from '@/components/common/FiltersPanel';
 import { Pagination } from '@/components/common/Pagination';
+import {
+  RecordCard,
+  RecordCardEmpty,
+  RecordCardField,
+  RecordCardFields,
+  RecordCardHeader,
+  RecordCardList,
+  RecordCardSkeletons,
+} from '@/components/common/RecordCard';
 import { ExportZipPanel } from '@/components/emails/ExportZipPanel';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -73,6 +83,79 @@ function buildQuery(filters: Filters, sender: string, page: number): string {
   params.set('page', String(page));
   params.set('limit', String(LIMIT));
   return params.toString();
+}
+
+function countActiveFilters(filters: Filters, sender: string): number {
+  return [
+    filters.accountId !== 'all',
+    filters.from !== '',
+    filters.to !== '',
+    filters.status !== 'all',
+    filters.hasAttachments !== 'all',
+    sender.trim() !== '',
+  ].filter(Boolean).length;
+}
+
+interface AttachmentRowProps {
+  attachment: Attachment;
+  onDownload: (attachment: Attachment) => void;
+}
+
+/**
+ * Fila de adjunto compartida por la tabla y las cards: apila nombre y acción en
+ * mobile (el botón toma el ancho completo) y las alinea en una fila desde `sm`.
+ */
+function AttachmentRow({ attachment, onDownload }: AttachmentRowProps) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border bg-card px-3 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+        <span className="shrink-0 rounded-sm bg-secondary px-1.5 py-0.5 text-xs font-medium text-secondary-foreground">
+          {attachment.fileType}
+        </span>
+        <span className="truncate text-sm" title={attachment.originalName}>
+          {attachment.originalName}
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {formatBytes(attachment.sizeBytes)}
+        </span>
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="w-full sm:w-auto"
+        onClick={(event) => {
+          event.stopPropagation();
+          onDownload(attachment);
+        }}
+      >
+        <DownloadIcon className="size-4" aria-hidden="true" />
+        Descargar
+      </Button>
+    </div>
+  );
+}
+
+interface EmailDetailProps {
+  email: ProcessedEmailWithAttachments;
+  onDownload: (attachment: Attachment) => void;
+}
+
+function EmailDetail({ email, onDownload }: EmailDetailProps) {
+  return (
+    <>
+      {email.errorDetail && <p className="mb-2 text-sm text-destructive">{email.errorDetail}</p>}
+      {email.attachments.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Este correo no tiene adjuntos archivados.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {email.attachments.map((attachment) => (
+            <AttachmentRow key={attachment.id} attachment={attachment} onDownload={onDownload} />
+          ))}
+        </div>
+      )}
+    </>
+  );
 }
 
 export function CorreosPage() {
@@ -151,6 +234,11 @@ export function CorreosPage() {
     });
   }
 
+  function clearFilters() {
+    setFilters(DEFAULT_FILTERS);
+    setSenderInput('');
+  }
+
   async function handleDownload(attachment: Attachment) {
     try {
       const { blob, filename } = await apiDownload(`/attachments/${attachment.id}/download`);
@@ -168,15 +256,19 @@ export function CorreosPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4 md:gap-6">
       <div>
-        <h1 className="text-2xl font-semibold">Correos</h1>
+        <h1 className="text-xl font-semibold md:text-2xl">Correos</h1>
         <p className="text-sm text-muted-foreground">
           Correos procesados y adjuntos archivados por cuenta.
         </p>
       </div>
 
-      <div className="grid gap-4 rounded-md border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <FiltersPanel
+        activeCount={countActiveFilters(filters, senderInput)}
+        onClear={clearFilters}
+        gridClassName="sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"
+      >
         <div className="flex flex-col gap-2">
           <Label>Cuenta</Label>
           <Select
@@ -264,7 +356,7 @@ export function CorreosPage() {
             </SelectContent>
           </Select>
         </div>
-      </div>
+      </FiltersPanel>
 
       {filters.accountId !== 'all' && (
         <ExportZipPanel
@@ -275,7 +367,66 @@ export function CorreosPage() {
         />
       )}
 
-      <div className="rounded-md border border-border">
+      {/* Mobile: una card por correo, con el asunto como titular y el detalle
+          desplegable dentro de la misma card. */}
+      <div className="md:hidden">
+        {loading ? (
+          <RecordCardSkeletons count={5} />
+        ) : emails.length === 0 ? (
+          <RecordCardEmpty>No hay correos que coincidan con los filtros.</RecordCardEmpty>
+        ) : (
+          <RecordCardList>
+            {emails.map((email) => {
+              const isExpanded = expandedIds.has(email.id);
+              return (
+                <RecordCard key={email.id}>
+                  <RecordCardHeader
+                    onClick={() => toggleExpanded(email.id)}
+                    title={
+                      <span className="flex items-start gap-2">
+                        {isExpanded ? (
+                          <ChevronDownIcon
+                            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <ChevronRightIcon
+                            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span className="truncate">{email.subject || '(sin asunto)'}</span>
+                      </span>
+                    }
+                    subtitle={email.senderName || email.senderEmail}
+                    aside={<EmailStatusBadge status={email.status} />}
+                  />
+
+                  <RecordCardFields columns={2}>
+                    <RecordCardField label="Recibido">
+                      {formatDateTime(email.receivedAt)}
+                    </RecordCardField>
+                    <RecordCardField label="Cuenta">{getAlias(email.accountId)}</RecordCardField>
+                  </RecordCardFields>
+
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <PaperclipIcon className="size-3.5" aria-hidden="true" />
+                    {email.attachmentCount} adjunto(s)
+                  </span>
+
+                  {isExpanded && (
+                    <div className="border-t border-border pt-3">
+                      <EmailDetail email={email} onDownload={handleDownload} />
+                    </div>
+                  )}
+                </RecordCard>
+              );
+            })}
+          </RecordCardList>
+        )}
+      </div>
+
+      <div className="hidden rounded-md border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -344,50 +495,7 @@ export function CorreosPage() {
                     {isExpanded && (
                       <TableRow className="bg-muted/30 hover:bg-muted/30">
                         <TableCell colSpan={7}>
-                          {email.errorDetail && (
-                            <p className="mb-2 text-sm text-destructive">{email.errorDetail}</p>
-                          )}
-                          {email.attachments.length === 0 ? (
-                            <p className="text-sm text-muted-foreground">
-                              Este correo no tiene adjuntos archivados.
-                            </p>
-                          ) : (
-                            <div className="flex flex-col gap-2">
-                              {email.attachments.map((attachment) => (
-                                <div
-                                  key={attachment.id}
-                                  className="flex items-center justify-between gap-4 rounded-md border border-border bg-card px-3 py-2"
-                                >
-                                  <div className="flex min-w-0 items-center gap-3">
-                                    <span className="rounded-sm bg-secondary px-1.5 py-0.5 text-xs font-medium text-secondary-foreground">
-                                      {attachment.fileType}
-                                    </span>
-                                    <span
-                                      className="truncate text-sm"
-                                      title={attachment.originalName}
-                                    >
-                                      {attachment.originalName}
-                                    </span>
-                                    <span className="shrink-0 text-xs text-muted-foreground">
-                                      {formatBytes(attachment.sizeBytes)}
-                                    </span>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      void handleDownload(attachment);
-                                    }}
-                                  >
-                                    <DownloadIcon className="size-4" aria-hidden="true" />
-                                    Descargar
-                                  </Button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
+                          <EmailDetail email={email} onDownload={handleDownload} />
                         </TableCell>
                       </TableRow>
                     )}

@@ -9,6 +9,8 @@
   },
   "packageManager": "pnpm@10.33.0",
   "scripts": {
+    "//postinstall": "Genera el cliente Prisma en el host. NO alcanza con el postinstall propio de @prisma/client: pnpm 10 lo bloquea salvo que el paquete esté en la lista de dependencias con build permitido, y esa lista cambió de lugar entre versiones de pnpm. El postinstall del propio proyecto, en cambio, corre siempre. Sin esto, los scripts de scripts/ compilan contra un cliente viejo tras cambiar el schema.",
+    "postinstall": "prisma generate",
     "prebuild": "rimraf dist",
     "build": "nest build",
     "start": "node dist/main.js",

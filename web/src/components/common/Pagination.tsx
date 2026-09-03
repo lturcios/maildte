@@ -14,6 +14,10 @@ interface PaginationProps {
  * expone un componente `pagination` en esta versión y el caso de uso acá
  * (avanzar/retroceder página con "mostrando X–Y de N") no justifica traer
  * una librería nueva.
+ *
+ * En mobile los dos botones se reparten el ancho completo (área táctil real,
+ * pulgar en la parte baja de la pantalla) y el contador de registros se apila
+ * arriba; a partir de `sm` vuelve a la fila única de escritorio.
  */
 export function Pagination({ page, limit, total, onPageChange }: PaginationProps) {
   const totalPages = Math.max(1, Math.ceil(total / limit));
@@ -21,8 +25,8 @@ export function Pagination({ page, limit, total, onPageChange }: PaginationProps
   const to = Math.min(page * limit, total);
 
   return (
-    <div className="flex items-center justify-between gap-4 pt-2">
-      <span className="text-sm text-muted-foreground">
+    <div className="flex flex-col gap-3 pt-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <span className="text-center text-sm text-muted-foreground sm:text-left">
         Mostrando {from}–{to} de {total}
       </span>
       <div className="flex items-center gap-2">
@@ -30,19 +34,21 @@ export function Pagination({ page, limit, total, onPageChange }: PaginationProps
           type="button"
           variant="outline"
           size="sm"
+          className="flex-1 sm:flex-none"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
           <ChevronLeftIcon className="size-4" aria-hidden="true" />
           Anterior
         </Button>
-        <span className="text-sm text-muted-foreground">
-          Página {page} de {totalPages}
+        <span className="shrink-0 text-sm text-muted-foreground">
+          {page} / {totalPages}
         </span>
         <Button
           type="button"
           variant="outline"
           size="sm"
+          className="flex-1 sm:flex-none"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
         >

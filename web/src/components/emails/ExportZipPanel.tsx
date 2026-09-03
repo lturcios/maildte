@@ -17,25 +17,34 @@ interface ExportZipPanelProps {
   to: string;
 }
 
-function sinceFromDate(dateOnly: string): string {
-  return new Date(`${dateOnly}T00:00:00.000Z`).toISOString();
-}
-
-/** "Hasta" es inclusivo del día completo (a diferencia del filtro de la tabla de Correos). */
-function untilFromDate(dateOnly: string): string {
-  return new Date(`${dateOnly}T23:59:59.999Z`).toISOString();
-}
-
-/** Arma el scope de accountId + since/until/month para /export/*. El mes completo tiene prioridad. */
+/**
+ * Arma el scope de /export/*.
+ *
+ * `receivedFrom`/`receivedTo` filtran por la fecha de RECEPCIÓN del correo, el
+ * mismo eje que usa la tabla de Correos y del que se deriva `monthFolder`. No se
+ * usan `since`/`until`: esos filtran por `Attachment.createdAt` (cuándo se
+ * archivó el adjunto) y son el cursor incremental del CLI maildte-pull, así que
+ * un rango de marzo devolvía cero archivos si el sync había corrido en agosto.
+ *
+ * El atajo de mes completo tiene prioridad y reemplaza el rango.
+ */
 function buildScope(accountId: string, month: string, from: string, to: string): URLSearchParams {
   const params = new URLSearchParams({ accountId });
   if (month) {
     params.set('month', month);
     return params;
   }
-  if (from) params.set('since', sinceFromDate(from));
-  if (to) params.set('until', untilFromDate(to));
+  if (from) params.set('receivedFrom', from);
+  if (to) params.set('receivedTo', to);
   return params;
+}
+
+function zipSuffix(month: string, from: string, to: string): string {
+  if (month) return month;
+  if (from && to) return `${from}_${to}`;
+  if (from) return `desde_${from}`;
+  if (to) return `hasta_${to}`;
+  return 'historico';
 }
 
 /**
@@ -87,7 +96,7 @@ export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipP
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `export_${accountAlias.replace(/\s+/g, '_')}_${month || 'periodo'}.zip`;
+      link.download = `export_${accountAlias.replace(/\s+/g, '_')}_${zipSuffix(month, from, to)}.zip`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -102,25 +111,27 @@ export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipP
   const hasFiles = meta !== null && meta.totalFiles > 0;
 
   return (
-    <div className="flex flex-wrap items-end gap-4 rounded-md border border-border bg-card p-4">
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="exportMonth">Mes completo (atajo)</Label>
-        <Input
-          id="exportMonth"
-          type="date"
-          value={monthPickerDate}
-          onChange={(event) => setMonthPickerDate(event.target.value)}
-        />
+    <section className="flex flex-col gap-4 rounded-lg border border-border bg-card p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-4">
+        <div className="flex flex-col gap-2 sm:w-48">
+          <Label htmlFor="exportMonth">Mes completo (atajo)</Label>
+          <Input
+            id="exportMonth"
+            type="date"
+            value={monthPickerDate}
+            onChange={(event) => setMonthPickerDate(event.target.value)}
+          />
+        </div>
+
+        <p className="text-xs leading-relaxed text-muted-foreground sm:max-w-sm">
+          {month
+            ? `Se descargan todos los adjuntos de ${month} (el día elegido no importa, solo el mes).`
+            : 'Usa "Desde" / "Hasta" de los filtros de arriba (fecha de recepción del correo). Sin ninguno de los dos, descarga todo el histórico de la cuenta.'}
+        </p>
       </div>
 
-      <p className="max-w-sm text-xs text-muted-foreground">
-        {month
-          ? `Se descargan todos los adjuntos de ${month} (el día elegido no importa, solo el mes).`
-          : 'Usa "Desde" / "Hasta" de los filtros de arriba (fecha en que se archivó el adjunto, no la de recepción del correo). Sin ninguno de los dos, descarga todo el histórico de la cuenta.'}
-      </p>
-
-      <div className="ml-auto flex items-center gap-3">
-        <span className="text-sm text-muted-foreground">
+      <div className="flex flex-col gap-3 border-t border-border pt-4 sm:flex-row sm:items-center sm:justify-end sm:gap-4">
+        <span className="text-sm text-muted-foreground sm:mr-auto">
           {loadingCount
             ? 'Calculando…'
             : meta
@@ -129,6 +140,7 @@ export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipP
         </span>
         <Button
           type="button"
+          className="w-full sm:w-auto"
           disabled={!hasFiles || downloading || loadingCount}
           onClick={() => void handleDownload()}
         >
@@ -136,6 +148,6 @@ export function ExportZipPanel({ accountId, accountAlias, from, to }: ExportZipP
           {downloading ? 'Generando ZIP…' : 'Descargar ZIP'}
         </Button>
       </div>
-    </div>
+    </section>
   );
 }

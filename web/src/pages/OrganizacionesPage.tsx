@@ -11,6 +11,16 @@ import { TenantFormDialog } from '@/components/tenants/TenantFormDialog';
 import { TenantUsageDialog } from '@/components/tenants/TenantUsageDialog';
 import { TenantStatusBadge } from '@/components/common/StatusBadges';
 import {
+  RecordCard,
+  RecordCardActions,
+  RecordCardEmpty,
+  RecordCardField,
+  RecordCardFields,
+  RecordCardHeader,
+  RecordCardList,
+  RecordCardSkeletons,
+} from '@/components/common/RecordCard';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -112,15 +122,15 @@ export function OrganizacionesPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="flex flex-col gap-4 md:gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold">Organizaciones</h1>
+          <h1 className="text-xl font-semibold md:text-2xl">Organizaciones</h1>
           <p className="text-sm text-muted-foreground">
             Alta y administración de tenants (organizaciones cliente) y sus admins.
           </p>
         </div>
-        <Button type="button" onClick={openCreateDialog}>
+        <Button type="button" className="w-full sm:w-auto" onClick={openCreateDialog}>
           <PlusIcon className="size-4" aria-hidden="true" />
           Nuevo tenant
         </Button>
@@ -128,7 +138,91 @@ export function OrganizacionesPage() {
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
-      <div className="rounded-md border border-border">
+      {/* Mobile: card por tenant. Las cuotas (máx. cuentas / almacenamiento) se
+          agrupan en dos columnas y las cinco acciones bajan al pie con etiqueta. */}
+      <div className="md:hidden">
+        {loading ? (
+          <RecordCardSkeletons count={3} />
+        ) : tenants.length === 0 ? (
+          <RecordCardEmpty>Todavía no hay tenants registrados.</RecordCardEmpty>
+        ) : (
+          <RecordCardList>
+            {tenants.map((tenant) => (
+              <RecordCard key={tenant.id}>
+                <RecordCardHeader
+                  title={tenant.name}
+                  subtitle={tenant.slug}
+                  aside={<TenantStatusBadge status={tenant.status} />}
+                />
+
+                <RecordCardFields columns={2}>
+                  <RecordCardField label="Máx. cuentas">{tenant.maxAccounts}</RecordCardField>
+                  <RecordCardField label="Máx. almacenamiento">
+                    {formatBytes(Number(tenant.maxStorageBytes))}
+                  </RecordCardField>
+                  <RecordCardField label="Creado">
+                    {formatDateTime(tenant.createdAt)}
+                  </RecordCardField>
+                </RecordCardFields>
+
+                <RecordCardActions>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setViewingUsageFor(tenant)}
+                  >
+                    <GaugeIcon className="size-4" aria-hidden="true" />
+                    Uso
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCreatingAdminFor(tenant)}
+                  >
+                    <UserPlusIcon className="size-4" aria-hidden="true" />
+                    Admin
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openEditDialog(tenant)}
+                  >
+                    <PencilIcon className="size-4" aria-hidden="true" />
+                    Editar
+                  </Button>
+                  {tenant.status === 'ACTIVO' ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSuspendingTenant(tenant)}
+                    >
+                      <BanIcon className="size-4 text-destructive" aria-hidden="true" />
+                      Suspender
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={activatingId === tenant.id}
+                      onClick={() => void handleActivate(tenant)}
+                    >
+                      <PlayIcon className="size-4 text-chart-4" aria-hidden="true" />
+                      Activar
+                    </Button>
+                  )}
+                </RecordCardActions>
+              </RecordCard>
+            ))}
+          </RecordCardList>
+        )}
+      </div>
+
+      <div className="hidden rounded-md border border-border md:block">
         <Table>
           <TableHeader>
             <TableRow>
