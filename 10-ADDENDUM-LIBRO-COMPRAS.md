@@ -1039,5 +1039,5 @@ Estimación total: 6–7 días.
 | 3 | ✅ implementada | 2026-09-07 | Cola `dte`, `DteEnqueuer`, `DteIngestService`, `DteParseProcessor` y hook en `SyncService.processMessage`. 29 tests nuevos. El backfill se expone en la Fase 4. |
 | 4 | ✅ implementada | 2026-09-07 | API `api/v1/purchase-book/*`: listado con filtros, resumen, detalle, clasificación, partes, catálogos, ledger y reprocesamiento. 65 tests unitarios + 37 e2e. |
 | 5 | ✅ implementada | 2026-09-07 | Export CSV (`;`, CRLF, sin BOM, sin encabezado) y XLSX con `write-excel-file`. Recorrido por cursor en lotes de 500 con topes validados antes de emitir bytes. 47 tests unitarios + 12 e2e. |
-| 6 | pendiente | | |
+| 6 | ✅ implementada | 2026-09-07 | Páginas `LibroComprasPage` y `ReceptoresPage`, componentes `SummaryStrip`, `ExportAnexoPanel`, `ReprocessButton`, `PurchaseDocumentSheet` y `ClassificationEditor`, dos stores Zustand, tipos y badges. Smoke con Playwright a 375 y 1280 px, incluida la descarga real del CSV. |
 | 7 | pendiente | | |

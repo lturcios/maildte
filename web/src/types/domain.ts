@@ -419,3 +419,265 @@ export interface TenantAdminUser {
   role: UserRole;
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Libro de compras (Addendum 10)
+//
+// Los montos viajan como STRING, no como number: en el backend son
+// Decimal(18,8) y convertirlos a punto flotante en el cliente reintroduciría
+// el error que el backend evita a propósito. Se formatean para mostrar y se
+// mandan tal cual cuando hace falta.
+// ---------------------------------------------------------------------------
+
+export type DteParseStatus =
+  | 'PARSEADO'
+  | 'DUPLICADO'
+  | 'IGNORADO_TIPO'
+  | 'VERSION_NO_SOPORTADA'
+  | 'NO_ES_DTE'
+  | 'JSON_INVALIDO'
+  | 'ARCHIVO_DEMASIADO_GRANDE'
+  | 'ARCHIVO_FALTANTE'
+  | 'ERROR';
+
+export type PartyRole = 'EMISOR' | 'RECEPTOR';
+
+/** Los cuatro defaults del Anexo 3 que un receptor aplica a sus compras. */
+export interface AnexoDefaults {
+  defaultTipoOperacion: number | null;
+  defaultClasificacion: number | null;
+  defaultSector: number | null;
+  defaultTipoCostoGasto: number | null;
+}
+
+/** Emisor o receptor del catálogo del tenant (GET /purchase-book/parties). */
+export interface DteParty extends AnexoDefaults {
+  id: string;
+  nit: string;
+  nrc: string | null;
+  nombre: string;
+  nombreComercial: string | null;
+  codActividad: string | null;
+  descActividad: string | null;
+  seenAsEmisor: boolean;
+  seenAsReceptor: boolean;
+  _count: { emisorDocuments: number; receptorDocuments: number };
+}
+
+/** Referencia mínima a una parte, tal como viene embebida en un documento. */
+export interface DtePartyRef {
+  id: string;
+  nombre: string;
+  nit: string;
+}
+
+/** Overrides Q–T de un documento. `null` = usar el default del receptor. */
+export interface AnexoOverrides {
+  anexoTipoOperacion: number | null;
+  anexoClasificacion: number | null;
+  anexoSector: number | null;
+  anexoTipoCostoGasto: number | null;
+  anexoNota: string | null;
+}
+
+/** Fila del listado del libro (GET /purchase-book/documents). */
+export interface PurchaseDocumentListItem extends AnexoOverrides {
+  id: string;
+  fecEmi: string;
+  tipoDte: string;
+  numeroControl: string;
+  codigoGeneracion: string;
+  emisorNit: string;
+  emisorNombre: string;
+  receptorNit: string;
+  receptorNombre: string;
+  totalExenta: string;
+  totalNoSuj: string;
+  totalGravada: string;
+  ivaCreditoFiscal: string;
+  montoTotalOperacion: string;
+  createdAt: string;
+  emisor: DtePartyRef;
+  receptor: DtePartyRef & AnexoDefaults;
+}
+
+export interface PurchaseDocumentItem {
+  id: string;
+  numItem: number;
+  tipoItem: number;
+  cantidad: string;
+  codigo: string | null;
+  uniMedida: number;
+  descripcion: string;
+  precioUni: string;
+  montoDescu: string;
+  ventaNoSuj: string;
+  ventaExenta: string;
+  ventaGravada: string;
+  tributos: string[];
+  psv: string;
+  noGravado: string;
+}
+
+export interface PurchaseDocumentTax {
+  id: string;
+  codigo: string;
+  descripcion: string;
+  valor: string;
+}
+
+export interface PurchaseDocumentPayment {
+  id: string;
+  position: number;
+  codigo: string;
+  montoPago: string;
+  referencia: string | null;
+  plazo: string | null;
+  periodo: number | null;
+}
+
+/** Detalle completo (GET /purchase-book/documents/:id). */
+export interface PurchaseDocumentDetail extends AnexoOverrides {
+  id: string;
+  attachmentId: string;
+  emailId: string;
+  accountId: string;
+  version: number;
+  ambiente: string;
+  tipoDte: string;
+  numeroControl: string;
+  codigoGeneracion: string;
+  tipoModelo: number;
+  tipoOperacion: number;
+  tipoContingencia: number | null;
+  motivoContin: string | null;
+  fecEmi: string;
+  horEmi: string;
+  tipoMoneda: string;
+  emisorNit: string;
+  emisorNrc: string | null;
+  emisorNombre: string;
+  emisorNombreComercial: string | null;
+  emisorCodActividad: string | null;
+  emisorTipoEstablecimiento: string | null;
+  emisorCodEstable: string | null;
+  emisorCodPuntoVenta: string | null;
+  receptorNit: string;
+  receptorNrc: string | null;
+  receptorNombre: string;
+  receptorNombreComercial: string | null;
+  totalNoSuj: string;
+  totalExenta: string;
+  totalGravada: string;
+  subTotalVentas: string;
+  descuNoSuj: string;
+  descuExenta: string;
+  descuGravada: string;
+  porcentajeDescuento: string;
+  totalDescu: string;
+  subTotal: string;
+  ivaRetenido: string;
+  ivaPercibido: string;
+  retencionRenta: string;
+  ivaCreditoFiscal: string;
+  montoTotalOperacion: string;
+  totalNoGravado: string;
+  totalPagar: string;
+  saldoFavor: string;
+  totalLetras: string;
+  condicionOperacion: number;
+  numPagoElectronico: string | null;
+  observaciones: string | null;
+  selloRecibido: string | null;
+  classifiedById: string | null;
+  classifiedAt: string | null;
+  parserVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  emisor: DteParty;
+  receptor: DteParty;
+  items: PurchaseDocumentItem[];
+  taxes: PurchaseDocumentTax[];
+  payments: PurchaseDocumentPayment[];
+  /** Solo llega con contenido para ADMIN; MIEMBRO recibe `null`. */
+  rawJson: unknown | null;
+}
+
+/** Totales del filtro activo (GET /purchase-book/documents/summary). */
+export interface PurchaseBookSummary {
+  documentCount: number;
+  totalExenta: string;
+  totalNoSuj: string;
+  totalGravada: string;
+  ivaCreditoFiscal: string;
+  montoTotalOperacion: string;
+  unclassifiedCount: number;
+  jsonAttachmentsWithoutParse: number;
+}
+
+/** Una opción de catálogo de Hacienda: el código que va al archivo y su etiqueta. */
+export interface CatalogOption {
+  code: number;
+  label: string;
+}
+
+export interface StringCatalogOption {
+  code: string;
+  label: string;
+}
+
+/** GET /purchase-book/catalogs. */
+export interface PurchaseBookCatalogs {
+  tipoOperacion: CatalogOption[];
+  clasificacion: CatalogOption[];
+  sector: CatalogOption[];
+  tipoCostoGasto: CatalogOption[];
+  tipoDocumento: StringCatalogOption[];
+  claseDocumento: CatalogOption[];
+  condicionOperacion: CatalogOption[];
+  formaPago: StringCatalogOption[];
+}
+
+export type ClassificationFilter = 'all' | 'classified' | 'unclassified';
+
+/** Body de PATCH /purchase-book/documents/:id/classification. */
+export type UpdateClassificationInput = Partial<AnexoOverrides>;
+
+/** Body de PATCH /purchase-book/parties/:id/defaults. */
+export type UpdatePartyDefaultsInput = Partial<AnexoDefaults>;
+
+export type ReprocessMode = 'missing' | 'failed' | 'all';
+
+/** Body de POST /purchase-book/reprocess. */
+export interface ReprocessInput {
+  mode: ReprocessMode;
+  accountId?: string;
+  month?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ReprocessResult {
+  enqueued: number;
+  nextCursor: string | null;
+}
+
+/** Fila del ledger de parseo (GET /purchase-book/parse-results, solo ADMIN). */
+export interface DteParseResult {
+  id: string;
+  attachmentId: string;
+  status: DteParseStatus;
+  tipoDte: string | null;
+  version: number | null;
+  codigoGeneracion: string | null;
+  documentId: string | null;
+  errorDetail: string | null;
+  parserVersion: number;
+  parsedAt: string;
+  attachment: {
+    originalName: string;
+    relativePath: string;
+    emailId: string;
+    sizeBytes: number;
+  };
+}

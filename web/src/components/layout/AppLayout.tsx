@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
+  BookOpenText,
   Building2,
   FileStack,
   LayoutDashboard,
@@ -40,6 +41,7 @@ const NAV_ITEMS: readonly NavItem[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/cuentas', label: 'Cuentas', icon: FileStack, end: false },
   { to: '/correos', label: 'Correos', icon: MailSearch, end: false },
+  { to: '/libro-compras', label: 'Libro de compras', icon: BookOpenText, end: false },
   { to: '/logs', label: 'Logs', icon: ScrollText, end: false },
 ];
 

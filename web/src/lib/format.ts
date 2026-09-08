@@ -57,3 +57,51 @@ export function formatDateTime(dateInput: string | Date | null): string {
 export function todayUtcDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
+
+const MONEY_FORMATTER = new Intl.NumberFormat('es-SV', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/**
+ * Formatea un monto que la API entrega como STRING.
+ *
+ * Los montos del libro de compras son Decimal(18,8) en el backend y viajan como
+ * texto justamente para no perder precision. Aca se convierte a number SOLO
+ * para mostrar: el valor formateado nunca vuelve al servidor.
+ */
+export function formatMoney(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === '') {
+    return MONEY_FORMATTER.format(0);
+  }
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? MONEY_FORMATTER.format(parsed) : String(value);
+}
+
+const DATE_ONLY_FORMATTER = new Intl.DateTimeFormat('es-SV', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/**
+ * Formatea una fecha calendario (columna DATE) como DD/MM/AAAA.
+ *
+ * La zona se fuerza a UTC porque el backend entrega `fecEmi` a medianoche UTC:
+ * con la zona local (UTC-6) se mostraria el dia anterior.
+ */
+export function formatDateOnly(dateInput: string | null | undefined): string {
+  if (!dateInput) {
+    return '—';
+  }
+  const date = new Date(dateInput);
+  return Number.isNaN(date.getTime()) ? '—' : DATE_ONLY_FORMATTER.format(date);
+}
+
+/** `YYYY-MM` del mes actual, para el atajo de periodo fiscal. */
+export function currentMonth(): string {
+  return new Date().toISOString().slice(0, 7);
+}
