@@ -1008,7 +1008,7 @@ Estimación total: 6–7 días.
 |---|---|---|---|
 | 0 | ✅ implementada | 2026-09-07 | `write-excel-file@4.1.1` adoptada (auditoría sin hallazgos propios); fixtures en `src/purchase-book/__fixtures__/`; PDF en `docs/reference/`; 4 variables de entorno. |
 | 1 | ✅ implementada | 2026-09-07 | 6 tablas + enum `DteParseStatus`; migración `20260908035947_purchase_book` con GRANT y RLS FORCE escritos a mano. Aislamiento verificado con el rol `maildte_app` (0 filas sin contexto, sin fuga entre tenants). |
-| 2 | pendiente | | |
+| 2 | ✅ implementada | 2026-09-07 | Parser puro v3/v4 (`parseDte`, `PARSER_VERSION` 1), helpers de acceso JSON, catálogos MH y `buildAnexoRow` con las 21 columnas. 93 tests nuevos. Carpeta verificada sin imports de Nest ni Prisma service. |
 | 3 | pendiente | | |
 | 4 | pendiente | | |
 | 5 | pendiente | | |
