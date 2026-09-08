@@ -1,8 +1,23 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  Res,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { Response } from 'express';
 import { Role } from '@prisma/client';
 import { PurchaseBookService } from './purchase-book.service';
 import { PartiesService } from './parties.service';
+import { ExportPurchaseBookService } from './export/export-purchase-book.service';
+import { ExportPurchaseBookDto } from './dto/export-purchase-book.dto';
+import { formatCsvRow } from './export/anexo-csv';
+import { writeAnexoXlsx } from './export/anexo-xlsx';
 import { ListPurchaseDocumentsDto } from './dto/list-purchase-documents.dto';
 import { UpdateClassificationDto } from './dto/update-classification.dto';
 import { ListPartiesDto } from './dto/list-parties.dto';
@@ -26,7 +41,50 @@ export class PurchaseBookController {
   constructor(
     private readonly purchaseBook: PurchaseBookService,
     private readonly parties: PartiesService,
+    private readonly exportService: ExportPurchaseBookService,
   ) {}
+
+  /**
+   * Anexo 3 "Detalle de Compras" en CSV o XLSX.
+   *
+   * Los topes se validan ANTES de tocar la respuesta: una vez enviados los
+   * headers 200 ya no se puede devolver un JSON de error limpio (mismo criterio
+   * que el ZIP de /export/archive).
+   */
+  @Get('export')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async export(
+    @Query() dto: ExportPurchaseBookDto,
+    @CurrentTenant() ctx: TenantContext,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { rows } = await this.exportService.collectRows(ctx, dto);
+
+    if (dto.format === 'csv') {
+      const fileName = this.exportService.buildFileName(dto, 'csv');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+      // Sin BOM y sin encabezado, por exigencia del portal de Hacienda.
+      for (const cells of rows) {
+        // Backpressure: si el socket se llena, se espera el drain en vez de
+        // acumular todo el archivo en el buffer del proceso.
+        if (!res.write(formatCsvRow(cells))) {
+          await new Promise<void>((resolve) => res.once('drain', resolve));
+        }
+      }
+      res.end();
+      return;
+    }
+
+    const fileName = this.exportService.buildFileName(dto, 'xlsx');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    await writeAnexoXlsx(rows, res, { header: dto.header ?? false });
+  }
 
   @Get('documents')
   async findAll(@Query() dto: ListPurchaseDocumentsDto, @CurrentTenant() ctx: TenantContext) {

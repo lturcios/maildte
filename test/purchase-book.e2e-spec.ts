@@ -544,4 +544,167 @@ describe('Libro de compras (e2e)', () => {
       expect(res.status).toBe(403);
     });
   });
+  /**
+   * El endpoint de export está limitado a 10 llamadas por minuto (Addendum 10,
+   * §10.6). Estos tests consolidan varias aserciones por respuesta a propósito:
+   * pedir el mismo archivo una vez por aserción agotaría el límite y los tests
+   * empezarían a recibir 429 en vez de probar lo que dicen probar.
+   */
+  describe('exportación del Anexo 3', () => {
+    /** Lee la respuesta como Buffer, para poder inspeccionar los bytes crudos. */
+    const asBuffer = (path: string, key = apiKeyA) =>
+      get(path, key)
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer) => chunks.push(chunk));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+
+    const lines = (body: Buffer): string[] =>
+      body
+        .toString('utf8')
+        .split('\r\n')
+        .filter((line) => line.length > 0);
+
+    beforeAll(async () => {
+      // Ambos documentos clasificados: si no, el export se bloquea con 422.
+      for (const id of [docV3Id, docV4Id]) {
+        await patchAsAdmin(`/purchase-book/documents/${id}/classification`).send({
+          anexoTipoOperacion: 1,
+          anexoClasificacion: 2,
+          anexoSector: 4,
+          anexoTipoCostoGasto: 2,
+        });
+      }
+    });
+
+    describe('CSV', () => {
+      let res: request.Response;
+      let body: Buffer;
+
+      beforeAll(async () => {
+        res = await asBuffer('/purchase-book/export?format=csv&month=2026-05');
+        body = res.body as Buffer;
+      });
+
+      it('responde con el content-type y el nombre de archivo correctos', () => {
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain('text/csv');
+        expect(res.headers['content-disposition']).toBe(
+          'attachment; filename="compras_2026-05.csv"',
+        );
+      });
+
+      it('no lleva BOM: el primer byte es el de la fecha', () => {
+        expect(body[0]).not.toBe(0xef);
+        expect(body.subarray(0, 10).toString('utf8')).toBe('28/05/2026');
+      });
+
+      it('usa CRLF, 21 columnas separadas por punto y coma, y no trae encabezado', () => {
+        const text = body.toString('utf8');
+        expect(text.endsWith('\r\n')).toBe(true);
+
+        const rows = lines(body);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].split(';')).toHaveLength(21);
+        // Sin encabezado: la primera celda ya es un dato, no un rótulo.
+        expect(rows[0].split(';')[0]).toBe('28/05/2026');
+      });
+
+      it('la columna O es el neto, sin sumar el crédito fiscal de N', () => {
+        const fields = lines(body)[0].split(';');
+        expect(fields[9]).toBe('144.00'); // J compras internas gravadas
+        expect(fields[13]).toBe('18.72'); // N crédito fiscal
+        expect(fields[14]).toBe('144.00'); // O total de compras
+      });
+
+      it('aplica la regla E/P según la longitud del identificador', async () => {
+        const marzo = await asBuffer(
+          '/purchase-book/export?format=csv&from=2026-03-01&to=2026-03-31',
+        );
+        const fields = lines(marzo.body as Buffer)[0].split(';');
+
+        // El emisor de la muestra v3 tiene 9 dígitos: va en P, no en E.
+        expect(fields[4]).toBe('');
+        expect(fields[15]).toBe('040522092');
+      });
+
+      it('exporta ordenado por fecha de emisión ascendente', async () => {
+        const todos = await asBuffer('/purchase-book/export?format=csv');
+        const rows = lines(todos.body as Buffer);
+
+        expect(rows).toHaveLength(2);
+        expect(rows[0].split(';')[0]).toBe('19/03/2026');
+        expect(rows[1].split(';')[0]).toBe('28/05/2026');
+      });
+
+      it('un tenant no exporta las compras de otro', async () => {
+        const otro = await asBuffer('/purchase-book/export?format=csv', apiKeyB);
+        const rows = lines(otro.body as Buffer);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).not.toContain('040522092');
+      });
+    });
+
+    it('el XLSX es un libro OOXML válido', async () => {
+      const res = await asBuffer('/purchase-book/export?format=xlsx&month=2026-05');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('spreadsheetml.sheet');
+      expect(res.headers['content-disposition']).toBe(
+        'attachment; filename="compras_2026-05.xlsx"',
+      );
+      expect((res.body as Buffer).subarray(0, 2).toString('ascii')).toBe('PK');
+    });
+
+    describe('validaciones previas al streaming', () => {
+      it('rechaza un formato desconocido', async () => {
+        const res = await get('/purchase-book/export?format=pdf');
+        expect(res.status).toBe(400);
+      });
+
+      it('rechaza con 422 un filtro sin compras', async () => {
+        const res = await get('/purchase-book/export?format=csv&month=2019-01');
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe('PURCHASE_BOOK_EMPTY');
+      });
+
+      it('SUPERADMIN no puede exportar', async () => {
+        const res = await request(app.getHttpServer())
+          .get('/api/v1/purchase-book/export?format=csv')
+          .set('Authorization', `Bearer ${superadminToken}`);
+
+        expect(res.status).toBe(403);
+      });
+    });
+
+    it('bloquea el export con compras sin clasificar y lo permite con allowUnclassified', async () => {
+      // Se limpian override y default para dejar el documento sin clasificar.
+      await patchAsAdmin(`/purchase-book/documents/${docV4Id}/classification`).send({
+        anexoTipoOperacion: null,
+        anexoClasificacion: null,
+        anexoSector: null,
+        anexoTipoCostoGasto: null,
+      });
+      await patchAsAdmin(`/purchase-book/parties/${receptorV4Id}/defaults`).send({
+        defaultTipoOperacion: null,
+        defaultClasificacion: null,
+        defaultSector: null,
+        defaultTipoCostoGasto: null,
+      });
+
+      const bloqueado = await get('/purchase-book/export?format=csv&month=2026-05');
+      expect(bloqueado.status).toBe(422);
+      expect(bloqueado.body.error).toBe('PURCHASE_BOOK_UNCLASSIFIED');
+
+      const permitido = await asBuffer(
+        '/purchase-book/export?format=csv&month=2026-05&allowUnclassified=true',
+      );
+      expect(permitido.status).toBe(200);
+      const fields = lines(permitido.body as Buffer)[0].split(';');
+      expect(fields.slice(16, 20)).toEqual(['', '', '', '']);
+    });
+  });
 });

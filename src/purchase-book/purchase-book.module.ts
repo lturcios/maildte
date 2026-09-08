@@ -3,6 +3,7 @@ import { DteQueueModule } from './queue/dte-queue.module';
 import { PurchaseBookController } from './purchase-book.controller';
 import { PurchaseBookService } from './purchase-book.service';
 import { PartiesService } from './parties.service';
+import { ExportPurchaseBookService } from './export/export-purchase-book.service';
 
 /**
  * Lado API del libro de compras. Importa DteQueueModule para poder ENCOLAR el
@@ -12,7 +13,7 @@ import { PartiesService } from './parties.service';
 @Module({
   imports: [DteQueueModule],
   controllers: [PurchaseBookController],
-  providers: [PurchaseBookService, PartiesService],
+  providers: [PurchaseBookService, PartiesService, ExportPurchaseBookService],
   exports: [PurchaseBookService],
 })
 export class PurchaseBookModule {}
