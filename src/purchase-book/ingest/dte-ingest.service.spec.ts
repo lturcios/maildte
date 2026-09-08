@@ -232,14 +232,19 @@ describe('DteIngestService', () => {
     });
 
     it('registra DUPLICADO cuando el codigoGeneracion ya existe en el tenant', async () => {
+      // Dentro de una transaccion con RLS, Postgres NO expone meta.target: Prisma
+      // reporta "Unique constraint failed on the (not available)". Por eso el
+      // mock lo omite a propósito, igual que en produccion.
       prismaMock.purchaseDocument.create.mockRejectedValue(
         new Prisma.PrismaClientKnownRequestError('unique', {
           code: 'P2002',
           clientVersion: '5.22.0',
-          meta: { target: ['tenantId', 'codigoGeneracion'] },
         }),
       );
-      prismaMock.purchaseDocument.findFirst.mockResolvedValue({ id: 'doc-canonico' });
+      prismaMock.purchaseDocument.findFirst.mockResolvedValue({
+        id: 'doc-canonico',
+        attachmentId: 'otro-adjunto',
+      });
 
       const status = await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
@@ -248,6 +253,34 @@ describe('DteIngestService', () => {
         status: DteParseStatus.DUPLICADO,
         documentId: 'doc-canonico',
       });
+    });
+
+    it('propaga la violacion unica si no hay documento canonico de otro adjunto', async () => {
+      // La restriccion violada fue otra: no hay que enmascararla como duplicado.
+      prismaMock.purchaseDocument.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('unique', {
+          code: 'P2002',
+          clientVersion: '5.22.0',
+        }),
+      );
+      prismaMock.purchaseDocument.findFirst.mockResolvedValue(null);
+
+      await expect(service.ingestAttachment(TENANT_ID, ATTACHMENT_ID)).rejects.toThrow();
+    });
+
+    it('propaga si el documento existente es el del propio adjunto', async () => {
+      prismaMock.purchaseDocument.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('unique', {
+          code: 'P2002',
+          clientVersion: '5.22.0',
+        }),
+      );
+      prismaMock.purchaseDocument.findFirst.mockResolvedValue({
+        id: 'doc-1',
+        attachmentId: ATTACHMENT_ID,
+      });
+
+      await expect(service.ingestAttachment(TENANT_ID, ATTACHMENT_ID)).rejects.toThrow();
     });
   });
 

@@ -324,14 +324,48 @@ export class DteIngestService {
     } catch (err) {
       // El mismo DTE puede llegar a dos buzones del tenant. El primero gana y
       // es el canónico; el segundo queda apuntando a él.
-      if (isPrismaUniqueViolation(err, 'codigoGeneracion')) {
-        return this.recordDuplicate(tenantId, attachmentId, identificacion.codigoGeneracion, {
-          tipoDte: identificacion.tipoDte,
-          version: identificacion.version,
-        });
+      //
+      // No se compara contra el NOMBRE del constraint: dentro de una transacción
+      // con RLS, Postgres no expone `meta.target` y Prisma reporta
+      // "Unique constraint failed on the (not available)". Verificado en el e2e.
+      // Por eso se detecta el P2002 genérico y se confirma la causa consultando
+      // el documento canónico, que además es el dato que hay que registrar.
+      if (isPrismaUniqueViolation(err)) {
+        const canonical = await this.findCanonical(
+          tenantId,
+          identificacion.codigoGeneracion,
+          attachmentId,
+        );
+        if (canonical) {
+          return this.recordDuplicate(tenantId, attachmentId, identificacion.codigoGeneracion, {
+            tipoDte: identificacion.tipoDte,
+            version: identificacion.version,
+            documentId: canonical,
+          });
+        }
       }
       throw err;
     }
+  }
+
+  /**
+   * Documento ya registrado para ese código de generación en OTRO adjunto.
+   * Devuelve `null` si no existe o si es el propio adjunto, en cuyo caso la
+   * violación única vino de otra restricción y hay que propagar el error.
+   */
+  private async findCanonical(
+    tenantId: string,
+    codigoGeneracion: string,
+    attachmentId: string,
+  ): Promise<string | null> {
+    const existing = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.purchaseDocument.findFirst({
+        where: { tenantId, codigoGeneracion },
+        select: { id: true, attachmentId: true },
+      }),
+    );
+    if (!existing || existing.attachmentId === attachmentId) return null;
+    return existing.id;
   }
 
   private async upsertParty(
@@ -473,22 +507,18 @@ export class DteIngestService {
     tenantId: string,
     attachmentId: string,
     codigoGeneracion: string,
-    meta: { tipoDte: string; version: number },
+    meta: { tipoDte: string; version: number; documentId: string },
   ): Promise<DteParseStatus> {
-    await this.prisma.withTenant(tenantId, async (tx) => {
-      const canonical = await tx.purchaseDocument.findFirst({
-        where: { tenantId, codigoGeneracion },
-        select: { id: true },
-      });
-      await this.upsertLedger(tx, tenantId, attachmentId, {
+    await this.prisma.withTenant(tenantId, (tx) =>
+      this.upsertLedger(tx, tenantId, attachmentId, {
         status: DteParseStatus.DUPLICADO,
         tipoDte: meta.tipoDte,
         version: meta.version,
         codigoGeneracion,
-        documentId: canonical?.id ?? null,
+        documentId: meta.documentId,
         errorDetail: 'El documento ya estaba registrado desde otro adjunto del mismo tenant',
-      });
-    });
+      }),
+    );
     this.logger.debug(
       { tenantId, attachmentId, codigoGeneracion },
       'DTE duplicado: ya existía en el libro de compras',

@@ -1037,7 +1037,7 @@ Estimación total: 6–7 días.
 | 1 | ✅ implementada | 2026-09-07 | 6 tablas + enum `DteParseStatus`; migración `20260908035947_purchase_book` con GRANT y RLS FORCE escritos a mano. Aislamiento verificado con el rol `maildte_app` (0 filas sin contexto, sin fuga entre tenants). |
 | 2 | ✅ implementada | 2026-09-07 | Parser puro v3/v4 (`parseDte`, `PARSER_VERSION` 1), helpers de acceso JSON, catálogos MH y `buildAnexoRow` con las 21 columnas. 93 tests nuevos. Carpeta verificada sin imports de Nest ni Prisma service. |
 | 3 | ✅ implementada | 2026-09-07 | Cola `dte`, `DteEnqueuer`, `DteIngestService`, `DteParseProcessor` y hook en `SyncService.processMessage`. 29 tests nuevos. El backfill se expone en la Fase 4. |
-| 4 | pendiente | | |
+| 4 | ✅ implementada | 2026-09-07 | API `api/v1/purchase-book/*`: listado con filtros, resumen, detalle, clasificación, partes, catálogos, ledger y reprocesamiento. 65 tests unitarios + 37 e2e. |
 | 5 | pendiente | | |
 | 6 | pendiente | | |
 | 7 | pendiente | | |
