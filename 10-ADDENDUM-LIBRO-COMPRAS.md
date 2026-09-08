@@ -1,6 +1,6 @@
 # Addendum 10 — Libro de Compras (parseo de DTE y Anexo 3 "Detalle de Compras")
 
-Estado: **plan aprobado, pendiente de implementación**
+Estado: **✅ implementado** (fases 0 a 7 completas, 2026-09-08)
 Depende de: `03-ARQUITECTURA-TECNICA.md`, `07-ADDENDUM-EXPORT-SYNC.md`, `08-ADDENDUM-MULTITENANT.md`
 Fecha de decisión: 2026-09-07
 
@@ -829,6 +829,41 @@ tabla dentro de contenedor `overflow-x-auto`; paleta y tipografías existentes
     `pnpm audit --prod --audit-level=moderate`, `pnpm why <dep>`, `pnpm licenses list --prod`.
     `exceljs` y `xlsx` prohibidos (§3.3).
 
+### 10.1 Revisión de seguridad del diff completo (Fase 7, 2026-09-08)
+
+Revisión sobre las 78 archivos y ~12 000 líneas de la rama `feat/libro-compras`.
+
+| # | Control | Resultado |
+|---|---|---|
+| 1 | RLS `ENABLE` + `FORCE` + policy `tenant_isolation` en las 6 tablas nuevas | ✅ 6 de 6, verificado en la migración y contra la base con el rol `maildte_app` |
+| 2 | `tenantId` en cada consulta | ✅ Las 20 consultas de `src/purchase-book` usan un `where` construido con `tenantId` (`buildPurchaseDocumentWhere`), lo repiten explícitamente, o operan sobre un id cuya pertenencia ya se verificó con un `findFirst({ id, tenantId })` previo dentro de la misma transacción |
+| 3 | Acceso a disco solo por `resolveSafe` | ✅ Un único `readFile`/`stat`, sobre la ruta que devuelve `resolveSafe(tenantSlug, relativePath)`, con el slug tomado del tenant y nunca del adjunto ni del job |
+| 4 | Cap de tamaño del JSON | ✅ Doble: contra `sizeBytes` de la fila (evita tocar disco) y contra el `stat` del archivo real |
+| 5 | Roles en endpoints que mutan | ✅ `@Roles(Role.ADMIN)` en las dos rutas `PATCH`, en `POST /reprocess` y en `GET /parse-results`. SUPERADMIN recibe `FORBIDDEN_ROLE` desde el service |
+| 6 | `rawJson` restringido | ✅ Se pide a la base solo si el actor es ADMIN (`select: { rawJson: includeRaw }`), no se filtra después de traerlo |
+| 7 | Rutas del servidor en la API | ✅ Ninguna ruta absoluta. El único `relativePath` expuesto está en `parse-results` (ADMIN), consistente con el manifiesto de `/export` que ya lo devolvía |
+| 8 | Inyección de fórmulas en CSV | ✅ `neutralizeFormula` sobre celdas de texto; los montos están normalizados y clampeados a `0.00`, así que nunca empiezan con signo |
+| 9 | Validación antes del streaming | ✅ Filtro vacío, tope de filas y compras sin clasificar responden 422 con JSON limpio antes de emitir headers |
+| 10 | Recorrido acotado | ✅ Cursor en lotes de 500; ningún `findMany` sin `take` en todo el módulo |
+| 11 | Throttling | ✅ 10/min en el export, 5/min en el reprocesamiento |
+| 12 | Prototype pollution | ✅ El parser lee con `hasOwnProperty.call` y nunca hace merge ni spread del JSON crudo. Tres tests lo verifican, incluido uno que confirma que `Object.prototype` queda intacto |
+| 13 | Higiene de logs | ✅ Ningún log incluye nombres, direcciones, correos ni el contenido del documento. Solo ids, estado y `codigoGeneracion` |
+| 14 | `any` | ✅ Ninguno, ni en el backend ni en el panel |
+| 15 | Aritmética de punto flotante sobre montos | ✅ Una sola conversión a `number`, en `toXlsxCell`, documentada como excepción: es el último paso, sobre un valor ya redondeado a 2 decimales, y no queda aritmética después |
+| 16 | Auditoría de dependencias | ⚠️ Ver abajo |
+
+**Auditoría (`pnpm audit --prod --audit-level=moderate`, 2026-09-08):** 17
+vulnerabilidades (1 baja, 9 moderadas, 7 altas). **Ninguna ruta menciona
+`write-excel-file` ni `fflate`**, verificado programáticamente sobre la salida
+JSON del audit. Las 17 vienen del árbol de NestJS 10, `archiver` y `mailparser`
+(`multer`, `qs`, `lodash`, `file-type`, `@nestjs/core`, `glob`, `deepmerge-ts`) y
+ya estaban en `main` antes de esta rama.
+
+**Deuda registrada, fuera del alcance de este addendum:** corregirlas exige subir
+NestJS de major (10 → 11, con `multer` 1.x → 2.x) y evaluar `overrides` para `qs`,
+`lodash` y `glob`. Es un trabajo de mantenimiento propio, con su propio riesgo de
+regresión, y no debería mezclarse con una característica de negocio.
+
 ---
 
 ## 11. Tests obligatorios
@@ -1040,4 +1075,26 @@ Estimación total: 6–7 días.
 | 4 | ✅ implementada | 2026-09-07 | API `api/v1/purchase-book/*`: listado con filtros, resumen, detalle, clasificación, partes, catálogos, ledger y reprocesamiento. 65 tests unitarios + 37 e2e. |
 | 5 | ✅ implementada | 2026-09-07 | Export CSV (`;`, CRLF, sin BOM, sin encabezado) y XLSX con `write-excel-file`. Recorrido por cursor en lotes de 500 con topes validados antes de emitir bytes. 47 tests unitarios + 12 e2e. |
 | 6 | ✅ implementada | 2026-09-07 | Páginas `LibroComprasPage` y `ReceptoresPage`, componentes `SummaryStrip`, `ExportAnexoPanel`, `ReprocessButton`, `PurchaseDocumentSheet` y `ClassificationEditor`, dos stores Zustand, tipos y badges. Smoke con Playwright a 375 y 1280 px, incluida la descarga real del CSV. |
-| 7 | pendiente | | |
+| 7 | ✅ implementada | 2026-09-08 | `RUNBOOK.md` §9, reglas 27–30 y anti-patrón en `CLAUDE.md`, ADR-10.1…10.9 en la arquitectura, PRD y plan actualizados. Revisión de seguridad de 16 controles (§10.1) y re-auditoría de dependencias. |
+
+**Desvíos respecto del plan original**, todos documentados en su lugar:
+
+1. **Columna O del Anexo 3.** El plan la calculaba como `G + J + N` porque coincidía con
+   `montoTotalOperacion` en las dos muestras. Es incorrecto: O es el total gravado neto y N
+   es el impuesto que esa compra genera. La fórmula correcta es la suma de G a M, y la
+   coincidencia era casual. Corregido en la Fase 4 y registrado como ADR-10.9.
+2. **Detección de duplicados.** El plan comparaba el nombre del constraint violado. Dentro de
+   una transacción con RLS, Postgres no expone `meta.target`, así que esa comparación falla
+   siempre. Se detecta el `P2002` genérico y se confirma la causa consultando el documento
+   canónico. Lo encontró el e2e.
+3. **Encolado del parseo.** El plan lo ubicaba "después del commit"; la primera
+   implementación quedó dentro del `try` de la transacción, donde un Redis caído habría
+   disparado el rollback y borrado adjuntos ya archivados. Vive fuera, con test de regresión.
+4. **`isNegativeAmount`.** decimal.js conserva el cero con signo: `-0.004` redondea a `-0` y
+   se marcaba como monto negativo sin serlo. Ahora exige `isNegative() && !isZero()`.
+5. **Una excepción a la regla de `Decimal`**, en `toXlsxCell`: una celda numérica de XLSX
+   tiene que ser un `number`. Está acotada al último paso y documentada en el código y en la
+   regla 27 de `CLAUDE.md`.
+
+**Totales de la característica:** 78 archivos, ~12 000 líneas. 405 tests unitarios y 89 e2e
+en verde.

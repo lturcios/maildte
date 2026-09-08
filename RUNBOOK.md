@@ -32,7 +32,15 @@ tenés un token de acceso (`TOKEN`) obtenido con `POST /auth/login` (sección 3)
    LOG_LEVEL=info
    MAX_ATTACHMENT_MB=25
    EXPORT_MAX_ZIP_FILES=5000
+   PURCHASE_BOOK_EXPORT_MAX_ROWS=20000
+   PURCHASE_BOOK_REPROCESS_BATCH=1000
+   DTE_MAX_JSON_BYTES=2097152
+   DTE_QUEUE_CONCURRENCY=4
    ```
+
+   Las cuatro últimas son del libro de compras (Addendum 10) y tienen valores
+   por defecto razonables: se pueden omitir del `.env` salvo que haya que
+   ajustarlas. Ver la sección 9.
 
    `APP_DATABASE_URL` apunta al rol restringido `maildte_app` — ese rol lo crea
    automáticamente la migración `multi_tenancy` la primera vez que corre
@@ -563,3 +571,160 @@ docker compose -f docker-compose.prod.yml start api worker
 podrían estar siendo escritos en ese instante — no es necesario para el
 *respaldo*, que es de solo lectura sobre el origen, pero sí para una
 *restauración* que sobrescribe.)
+
+---
+
+## 9. Libro de compras: backfill y reprocesamiento de DTE
+
+El libro de compras (Addendum 10) se alimenta solo: cada vez que el sync
+archiva un adjunto JSON, encola su lectura en la cola `dte` y el worker lo
+incorpora. El reprocesamiento manual hace falta en tres situaciones:
+
+1. **Después de desplegar el Addendum 10 por primera vez** — todos los JSON ya
+   archivados son anteriores al parser y nadie los encoló.
+2. **Si Redis estuvo caído durante un sync** — el correo se archivó igual (el
+   encolado no puede hacer fallar el archivado, a propósito), pero el trabajo
+   nunca llegó a la cola.
+3. **Al subir `PARSER_VERSION`** — hay documentos leídos con una versión
+   anterior de la normalización.
+
+### Diferencia con el §6
+
+El §6 vuelve a **descargar correos** del buzón IMAP. Esto **no toca el buzón ni
+`lastUid`**: solo relee archivos que ya están en disco. Por eso sí tiene
+endpoint de API y es seguro repetirlo cuantas veces haga falta.
+
+### Disparar el reprocesamiento
+
+Requiere un token de **ADMIN** del tenant (una API key no alcanza: son
+`MIEMBRO`). El endpoint responde por páginas con un cursor:
+
+```bash
+API=https://<host>/api/v1
+TOKEN=<accessToken de un ADMIN del tenant>
+
+# Modo "missing": solo los JSON que nunca se leyeron. Es el caso normal.
+curl -s -X POST "$API/purchase-book/reprocess" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"missing"}'
+# -> {"data":{"enqueued":500,"nextCursor":"<attachmentId>"}}
+```
+
+Mientras `nextCursor` no sea `null` hay más páginas. El bucle completo:
+
+```bash
+CURSOR=null
+TOTAL=0
+while : ; do
+  BODY=$([ "$CURSOR" = "null" ] \
+    && echo '{"mode":"missing"}' \
+    || echo "{\"mode\":\"missing\",\"cursor\":\"$CURSOR\"}")
+
+  RES=$(curl -s -X POST "$API/purchase-book/reprocess" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d "$BODY")
+
+  TOTAL=$(( TOTAL + $(echo "$RES" | jq '.data.enqueued') ))
+  CURSOR=$(echo "$RES" | jq -r '.data.nextCursor')
+  echo "encolados hasta ahora: $TOTAL"
+  [ "$CURSOR" = "null" ] && break
+done
+```
+
+El panel web hace exactamente este bucle desde el botón **Reprocesar** de
+`/panel/libro-compras`; la vía `curl` es para cuando hay que acotar el alcance
+con más precisión o correrlo desatendido.
+
+**Modos disponibles:**
+
+| `mode` | Qué encola |
+|---|---|
+| `missing` | JSON sin fila en el ledger. El de todos los días. |
+| `failed` | Además los estados de error y los leídos con un `parserVersion` anterior. |
+| `all` | Todo el filtro, forzando la relectura. **Conserva la clasificación manual Q–T.** |
+
+Filtros opcionales para acotar (`accountId`, `month` sobre la carpeta mensual
+del correo, `from`/`to` sobre la fecha de recepción):
+
+```bash
+curl -s -X POST "$API/purchase-book/reprocess" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mode":"failed","accountId":"<accountId>","month":"2026-07"}'
+```
+
+El endpoint está limitado a 5 llamadas por minuto y cada página encola como
+máximo `PURCHASE_BOOK_REPROCESS_BATCH` (1000 por defecto) trabajos.
+
+### Revisar qué pasó con cada archivo
+
+El ledger tiene **una fila por adjunto JSON**, con el resultado de su lectura.
+También es ADMIN:
+
+```bash
+# Todo lo que no se pudo leer
+curl -s "$API/purchase-book/parse-results?status=ERROR" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data[] | {originalName: .attachment.originalName, errorDetail}'
+```
+
+Estados y qué significan:
+
+| Estado | Significado | ¿Requiere acción? |
+|---|---|---|
+| `PARSEADO` | Incorporado al libro. | No. |
+| `DUPLICADO` | El mismo `codigoGeneracion` ya estaba registrado desde otro adjunto del tenant. Pasa cuando el proveedor manda el DTE a dos buzones de la misma empresa. `documentId` apunta al documento canónico. | **No.** Es el comportamiento correcto, no un error. |
+| `IGNORADO_TIPO` | Es un DTE válido pero no es Comprobante de Crédito Fiscal (`tipoDte` distinto de `03`). | No. El libro de compras solo incorpora el `03`. |
+| `VERSION_NO_SOPORTADA` | `identificacion.version` fuera de {3, 4}. | Sí: probablemente Hacienda publicó una versión nueva del esquema. |
+| `NO_ES_DTE` | JSON válido que no tiene estructura de DTE. Suele ser otro adjunto `.json` cualquiera. | No, salvo que el proveedor deba estar mandando un DTE. |
+| `JSON_INVALIDO` | El archivo no es JSON parseable. Emisor con un generador roto. | Sí: pedirle el documento de nuevo al proveedor. |
+| `ARCHIVO_FALTANTE` | La fila existe pero el archivo ya no está en el storage. | Sí: revisar respaldos (§8). |
+| `ARCHIVO_DEMASIADO_GRANDE` | Excede `DTE_MAX_JSON_BYTES` (2 MiB por defecto). | Revisar el archivo antes de subir el límite. |
+| `ERROR` | Faltan campos obligatorios o tienen un tipo inesperado. `errorDetail` lista cada uno con su ruta (`resumen.totalGravada: campo obligatorio ausente`). | Sí: el DTE está mal formado en origen. |
+
+Tras corregir la causa, `mode=failed` vuelve a intentar solo lo que falló.
+
+### Seguir el trabajo en los logs del worker
+
+El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y
+`codigoGeneracion`. **Nunca loguea el contenido del JSON ni nombres o
+direcciones del documento.**
+
+```bash
+# Todo lo del parseo de DTE
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.context == "DteIngestService" or .context == "DteParseProcessor")'
+
+# Un archivo puntual, de punta a punta
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.attachmentId == "<attachmentId>")'
+
+# Solo los trabajos que fallaron y se van a reintentar
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.context == "DteParseProcessor" and .level >= 50)'
+```
+
+Los fallos deterministas (JSON roto, archivo faltante, tipo ignorado) **no se
+reintentan**: quedan en el ledger y el trabajo termina bien. Solo se reintentan
+los fallos de infraestructura, hasta 3 veces con espera creciente.
+
+### Variables que gobiernan este flujo
+
+| Variable | Default | Para qué |
+|---|---|---|
+| `DTE_QUEUE_CONCURRENCY` | `4` | Lecturas simultáneas en el worker. Comparte el pool de Prisma con el sync: subirlo mucho compite con la descarga de correo. |
+| `DTE_MAX_JSON_BYTES` | `2097152` | Tope de tamaño del JSON antes de leerlo. |
+| `PURCHASE_BOOK_REPROCESS_BATCH` | `1000` | Máximo de trabajos por página del reprocesamiento. |
+| `PURCHASE_BOOK_EXPORT_MAX_ROWS` | `20000` | Tope de filas del Anexo 3. Por encima, el export responde `422 EXPORT_TOO_LARGE`. |
+
+### El export del Anexo 3 devuelve 422
+
+Tres causas, todas con mensaje explícito en el cuerpo:
+
+- `PURCHASE_BOOK_EMPTY` — el filtro no incluye ninguna compra.
+- `EXPORT_TOO_LARGE` — más filas que `PURCHASE_BOOK_EXPORT_MAX_ROWS`. Acotar el
+  período.
+- `PURCHASE_BOOK_UNCLASSIFIED` — hay compras sin las columnas Q–T resueltas.
+  Se arregla configurando los valores por defecto del receptor en
+  `/panel/libro-compras/receptores`, o clasificando cada compra desde su
+  detalle. Exportar igual con `allowUnclassified=true` genera un archivo con
+  esas columnas vacías, que Hacienda puede rechazar.

@@ -44,6 +44,12 @@ Servicio NestJS que sincroniza múltiples cuentas IMAP, descarga adjuntos JSON/P
 25. Logs con pino estructurado incluyendo `accountId` y `syncId` en el contexto del sync. Prohibido `console.log`.
 26. Tests: cada service de dominio (`sync`, `storage`, `accounts`) con unit tests (mock de Prisma/ImapFlow). Mínimo: idempotencia, colisión de nombres, sanitización, cálculo de monthFolder en bordes de mes/TZ.
 
+### Libro de compras (Addendum 10)
+27. **Montos solo con `Prisma.Decimal`.** Prohibido `Number()`, `parseFloat()` o aritmética de punto flotante sobre importes en cualquier punto de `src/purchase-book`. Los JSON traen `precioUni` con 8 decimales y el Anexo 3 se compara centavo a centavo contra la declaración: un redondeo intermedio en `number` es un descuadre. El único punto de conversión desde el JSON es `toDecimal()` de `parser/json-access.ts`. **Única excepción documentada:** `toXlsxCell()` de `export/anexo-xlsx.ts`, porque una celda numérica de XLSX tiene que ser un `number`; ocurre en el último paso, sobre un valor ya redondeado a 2 decimales, y no queda aritmética después.
+28. **El parseo de DTE vive únicamente en `src/purchase-book/parser`.** Esa carpeta es pura: sin imports de Nest, sin `PrismaService`, sin acceso a disco. Nadie más interpreta la estructura del JSON de Hacienda. Al cambiar la normalización hay que subir `PARSER_VERSION` y correr el backfill en modo `failed` (RUNBOOK §9).
+29. **El mapeo de las 21 columnas del Anexo 3 vive únicamente en `anexo/build-anexo-row.ts`.** Los adaptadores de CSV y XLSX consumen celdas ya tipadas y no deciden nada sobre el contenido. La columna O es la suma de G a M y **no** incluye el crédito fiscal de N (ADR-10.9): O es el total gravado neto, N es el impuesto que esa compra genera.
+30. Las columnas Q–T del anexo no existen en el DTE: se resuelven con `resolveClassification()` (override del documento > default del receptor > sin clasificar). Nunca se inventa un código para completar una fila.
+
 ## Anti-patrones (prohibido)
 
 - ❌ Descargar el buzón completo en cada sync (siempre incremental por UID).
@@ -54,6 +60,7 @@ Servicio NestJS que sincroniza múltiples cuentas IMAP, descarga adjuntos JSON/P
 - ❌ Capturar excepciones y silenciarlas (`catch {}`). Todo catch loggea y decide: reintentar, registrar ERROR o propagar.
 - ❌ Migrar datos o borrar carpetas de storage desde código de aplicación sin flag explícito de mantenimiento.
 - ❌ Devolver rutas absolutas del servidor en la API (solo `relativePath`).
+- ❌ Exportar sin tope de filas ni recorrido por cursor: todo endpoint que emita un archivo valida el conteo **antes** de mandar headers (una vez enviado el 200 ya no se puede devolver un error limpio) y recorre en lotes con `take`, nunca con un `findMany` abierto.
 
 ## Comandos del proyecto
 
@@ -63,13 +70,19 @@ pnpm prisma migrate dev
 pnpm start:dev          # API con watch
 pnpm start:worker:dev   # Worker con watch
 pnpm test
+pnpm test:e2e           # requiere Postgres y Redis levantados
 pnpm lint
 pnpm build
+
+pnpm --dir web lint     # panel web
+pnpm --dir web build
+pnpm --dir web dev
 ```
 
 ## Definición de terminado (DoD) por tarea
 1. Compila con `pnpm build` sin warnings de TS.
 2. `pnpm lint` limpio.
-3. Tests de la funcionalidad pasan.
-4. Sin `any`, sin `console.log`, sin secrets hardcodeados.
-5. Reglas de este archivo verificadas contra el diff.
+3. Tests de la funcionalidad pasan (`pnpm test`; `pnpm test:e2e` si tocaste esquema, RLS o endpoints).
+4. Si tocaste `web/`: `pnpm --dir web lint` y `pnpm --dir web build` limpios.
+5. Sin `any`, sin `console.log`, sin secrets hardcodeados.
+6. Reglas de este archivo verificadas contra el diff.

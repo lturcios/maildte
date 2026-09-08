@@ -48,7 +48,18 @@ export const ANEXO_HEADER = [
   'Número de anexo',
 ] as const;
 
-/** Convierte una celda del builder a la representación de la librería. */
+/**
+ * Convierte una celda del builder a la representación de la librería.
+ *
+ * ÚNICA excepción permitida a la regla 27 de `CLAUDE.md` (montos solo con
+ * `Prisma.Decimal`), y está acotada a propósito: una celda numérica de XLSX
+ * tiene que ser un `number`, no hay otro tipo que la hoja sepa sumar. La
+ * conversión es segura porque ocurre en el último paso, sobre un valor que
+ * `toAnexoAmount` ya redondeó a exactamente 2 decimales: no queda aritmética
+ * después de este punto que pueda arrastrar el error del punto flotante.
+ *
+ * No usar esto como precedente para convertir montos en ningún otro lado.
+ */
 export function toXlsxCell(cell: AnexoCell): CellObject {
   if (cell.kind === 'amount') {
     return { value: Number(cell.value), type: Number, format: AMOUNT_FORMAT };

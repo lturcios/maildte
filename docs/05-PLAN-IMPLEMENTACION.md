@@ -63,8 +63,21 @@ Cada fase es autocontenida, termina en estado desplegable y tiene su prompt para
 
 ## Fase 5 (opcional, post-MVP) — Panel web y metadatos DTE
 
-- **5a Panel**: React 19 + Vite + Tailwind + shadcn/ui + Zustand. Vistas: dashboard (stats), cuentas (CRUD + estado + botón sync), correos (tabla con filtros + descarga), logs. Auth por API key almacenada en Zustand persist.
-- **5b Metadatos DTE**: al procesar un JSON, intentar parsear estructura DTE MH (identificacion.codigoGeneracion, tipoDte, emisor.nit, emisor.nombre, resumen.totalPagar, fecEmi). Nueva tabla `DteMetadata` relacionada a `Attachment`, tolerante a JSON no-DTE (parseo best-effort, nunca falla el sync). Filtros nuevos en /emails por NIT emisor y tipoDte.
+**Estado: ✅ implementada.** Ambas partes se completaron, la segunda con un alcance mayor
+al planificado acá.
+
+- **5a Panel** ✅: React 19 + Vite + Tailwind + shadcn/ui + Zustand. Vistas: dashboard (stats), cuentas (CRUD + estado + botón sync), correos (tabla con filtros + descarga), logs. La autenticación terminó siendo por JWT con refresh, no por API key en el navegador: guardar una API key de tenant en `localStorage` la exponía a XSS sin poder revocarla por sesión.
+- **5b Metadatos DTE** ✅, ampliado: en vez de una tabla `DteMetadata` con seis campos para búsqueda, el **Addendum 10** normaliza el Comprobante de Crédito Fiscal completo (identificación, emisor, receptor, resumen y cuerpo del documento, esquemas v3 y v4) en seis tablas con RLS, y sobre eso construye el **libro de compras** y el **Anexo 3 "Detalle de Compras"** exportable a CSV y XLSX.
+
+  El cambio de alcance vino de para qué se descargan estos DTE: el objetivo real no era
+  buscar por NIT, era declarar. Guardar solo los seis campos habría exigido volver a leer
+  los archivos para generar el anexo.
+
+  Lo que se mantuvo del plan original: el parseo es **tolerante y nunca hace fallar el
+  sync** — corre en su propia cola BullMQ, después de que el correo ya está archivado, y
+  todo resultado (incluido "no es un DTE") queda registrado en un ledger.
+
+  Detalle completo, fases y ADR en `10-ADDENDUM-LIBRO-COMPRAS.md`.
 
 ---
 
