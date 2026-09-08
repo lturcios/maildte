@@ -23,6 +23,7 @@ import {
 import { SyncScheduler } from './sync.scheduler';
 import { SyncTrigger } from './queue/sync-queue.constants';
 import { authFailKey } from './auth-fail-key';
+import { DteEnqueuer } from '../purchase-book/queue/dte-enqueuer';
 
 const LOCK_TTL_SECONDS = 600;
 const AUTH_FAIL_TTL_SECONDS = 24 * 60 * 60;
@@ -54,6 +55,7 @@ export class SyncService {
     private readonly storage: StorageService,
     private readonly config: AppConfigService,
     private readonly scheduler: SyncScheduler,
+    private readonly dteEnqueuer: DteEnqueuer,
     @Inject(REDIS_CONNECTION) private readonly redis: Redis,
     private readonly logger: PinoLogger,
   ) {
@@ -415,9 +417,11 @@ export class SyncService {
       }
     }
 
+    let jsonAttachmentIds: string[] = [];
+
     try {
-      await this.prisma.withTenant(account.tenantId, async (tx) => {
-        await tx.processedEmail.create({
+      const created = await this.prisma.withTenant(account.tenantId, async (tx) => {
+        const email = await tx.processedEmail.create({
           data: {
             tenantId: account.tenantId,
             accountId: account.id,
@@ -445,9 +449,15 @@ export class SyncService {
               })),
             },
           },
+          // Se piden los ids para encolar el parseo del libro de compras
+          // (Addendum 10, §6.3). Sin este select el create no los devuelve.
+          select: { attachments: { select: { id: true, fileType: true } } },
         });
         await tx.emailAccount.update({ where: { id: account.id }, data: { lastUid: uid } });
+        return email;
       });
+
+      jsonAttachmentIds = created.attachments.filter((a) => a.fileType === 'JSON').map((a) => a.id);
     } catch (err) {
       const rolledBack = saved.filter((s) => !s.reused);
       await this.storage.deleteFiles(
@@ -482,7 +492,32 @@ export class SyncService {
       return { status: 'error', filesSaved: 0 };
     }
 
+    // FUERA del try/catch de persistencia, y es deliberado: el correo ya está
+    // archivado en disco y en base. Si esto entrara al catch de arriba, un Redis
+    // caído dispararía el rollback y BORRARÍA archivos ya guardados. Encolar es
+    // una optimización; el backfill (mode=missing) recupera lo que no se encoló.
+    await this.enqueuePurchaseBookParse(account.tenantId, jsonAttachmentIds, logCtx);
+
     return { status: 'processed', filesSaved: saved.length };
+  }
+
+  /** Encola el parseo del libro de compras sin poder afectar al correo ya archivado. */
+  private async enqueuePurchaseBookParse(
+    tenantId: string,
+    attachmentIds: string[],
+    logCtx: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.dteEnqueuer.enqueueParseBulk(
+        attachmentIds.map((attachmentId) => ({ tenantId, attachmentId })),
+        'sync',
+      );
+    } catch (err) {
+      this.logger.warn(
+        { ...logCtx, err },
+        'No se pudo encolar el parseo del libro de compras; se recuperará con el reprocesamiento',
+      );
+    }
   }
 
   private async persistEmail(params: {

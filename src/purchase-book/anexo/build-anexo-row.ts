@@ -24,7 +24,7 @@ import { splitSupplierId } from './split-supplier-id';
  *   A fecEmi (DD/MM/AAAA)          L importaciones gravadas de bienes = 0.00
  *   B clase de documento = 4       M importaciones gravadas de servicios = 0.00
  *   C tipoDte                      N crédito fiscal (IVA 13 %)
- *   D codigoGeneracion sin guiones O total de compras = G + J + N
+ *   D codigoGeneracion sin guiones O total de compras = suma de G a M
  *   E NIT del proveedor            P DUI del proveedor
  *   F nombre del proveedor         Q tipo de operación
  *   G exentas y no sujetas         R clasificación
@@ -135,20 +135,41 @@ export function buildAnexoRow(
   // Columna G: exentas y no sujetas van juntas en el anexo de compras.
   const exentasYNoSujetas = doc.totalExenta.plus(doc.totalNoSuj);
 
-  // Se redondea ANTES de sumar para que la columna O cierre exactamente con la
-  // suma de las columnas ya impresas. Sumar en alta precisión y redondear al
-  // final produce diferencias de un centavo contra la verificación de Hacienda.
+  // Se redondea ANTES de sumar para que la columna O cierre exactamente con las
+  // columnas ya impresas. Sumar en alta precisión y redondear al final produce
+  // diferencias de un centavo contra la verificación de Hacienda.
   const g = roundToAnexoScale(exentasYNoSujetas);
   const j = roundToAnexoScale(doc.totalGravada);
   const n = roundToAnexoScale(doc.ivaCreditoFiscal);
-  const o = g.plus(j).plus(n);
+
+  // Columna O — "Total de compras": suma de G a M, tal como dice el instructivo.
+  //
+  // N (crédito fiscal) NO entra: O es el total gravado NETO y N es el impuesto
+  // que esa compra genera. Sumarlos daría el monto con IVA incluido, que es otra
+  // cosa. Las columnas H, I, K, L y M son cero en un CCF porque corresponden a
+  // internaciones e importaciones, que llegan por Declaración de Mercancías o
+  // Mandamiento de Ingreso, no por un DTE de compra nacional. Se suman igual,
+  // explícitamente, para que la fórmula quede fiel al instructivo el día que el
+  // libro incorpore esos tipos de documento.
+  const zero = roundToAnexoScale(new Prisma.Decimal(0));
+  const h = zero;
+  const i = zero;
+  const k = zero;
+  const l = zero;
+  const m = zero;
+  const o = g.plus(h).plus(i).plus(j).plus(k).plus(l).plus(m);
 
   const negativeAmount =
     isNegativeAmount(exentasYNoSujetas) ||
     isNegativeAmount(doc.totalGravada) ||
     isNegativeAmount(doc.ivaCreditoFiscal);
 
+  // Reconciliación contra el propio DTE: el neto de la columna O más el crédito
+  // fiscal de la columna N tiene que dar el monto total de la operación. Si no
+  // cierra, el documento trae totales inconsistentes y el contador debe mirarlo
+  // antes de enviar el anexo.
   const totalMismatch = o
+    .plus(n)
     .minus(roundToAnexoScale(doc.montoTotalOperacion))
     .abs()
     .greaterThan(MISMATCH_TOLERANCE);

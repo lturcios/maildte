@@ -4,9 +4,10 @@ import { ImapModule } from './imap/imap.module';
 import { StorageModule } from '../storage/storage.module';
 import { SyncService } from './sync.service';
 import { SyncProcessor } from './sync.processor';
+import { DteQueueModule } from '../purchase-book/queue/dte-queue.module';
 
 @Module({
-  imports: [SyncQueueModule, ImapModule, StorageModule],
+  imports: [SyncQueueModule, ImapModule, StorageModule, DteQueueModule],
   providers: [SyncService, SyncProcessor],
   exports: [SyncService],
 })

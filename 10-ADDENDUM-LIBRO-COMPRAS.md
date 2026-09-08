@@ -69,7 +69,7 @@ encabezados ni celdas combinadas**, 21 columnas en este orden:
 | L | Importaciones gravadas de bienes | 10 | `0.00` |
 | M | Importaciones gravadas de servicios | 10 | `0.00` |
 | N | Crédito fiscal | 10 | `resumen.tributos[codigo = "20"].valor` |
-| O | Total de compras | 10 | `G + J + N` (ver riesgo 1 en §13) |
+| O | Total de compras | 10 | **suma de G a M** (neto gravado; N NO se incluye) |
 | P | DUI del proveedor | 9 | `emisor.nit` si tiene **9 dígitos** (NIT homologado a DUI, persona natural); E vacío |
 | Q | Tipo de operación | 1 | 1 Gravada, 2 No gravada, 3 Excluido/no constituye renta, 4 Mixta |
 | R | Clasificación | 1 | 1 Costo, 2 Gasto |
@@ -228,6 +228,34 @@ tanto respeta la regla 7 (UTC en BD). `horEmi` se guarda como texto. `rawJson` c
 íntegro para el detalle y para re-normalizaciones futuras; las secciones sin normalizar
 (`documentoRelacionado`, `otrosDocumentos`, `ventaTercero`, `extension`, `apendice`) se copian
 además a columnas `Json?` propias para consulta barata.
+
+### ADR-10.9 — Columna O es la suma de G a M; el crédito fiscal de N queda fuera
+
+Decidido el 2026-09-07, cierra el riesgo 1 que quedó abierto en el diseño.
+
+**La fórmula es `O = G + H + I + J + K + L + M`**, exactamente lo que dice el instructivo.
+
+El razonamiento contable, que es el que manda sobre la coincidencia numérica:
+
+- **O es el total gravado NETO**: el valor de la compra sin impuesto.
+- **N es el crédito fiscal** que esa compra genera, o sea el impuesto en sí.
+- Sumar N dentro de O daría el monto con IVA incluido, que es otra magnitud y duplicaría el
+  impuesto en el total del anexo.
+- El propio instructivo lo delimita: "el total de las operaciones detalladas en las columnas
+  comprendidas de la G a la M". La columna O no se incluye a sí misma ni incluye a N.
+
+Las columnas H, I, K, L y M son `0.00` en un Comprobante de Crédito Fiscal porque
+corresponden a internaciones e importaciones, que se declaran con Declaración de Mercancías
+(tipo 12) o Mandamiento de Ingreso (tipo 13), no con un DTE de compra nacional. Aun así la
+suma las incluye explícitamente en `build-anexo-row.ts`, para que la fórmula quede fiel al
+instructivo el día que el libro incorpore esos tipos de documento.
+
+Consecuencia en las muestras del proyecto: la v3 exporta `O = 176.99` (no 200.00) y la v4
+`O = 144.00` (no 162.72).
+
+**Reconciliación contra el DTE:** la coincidencia que sí debe cumplirse es
+`O + N ≈ montoTotalOperacion`. Esa es la comprobación que hace la bandera `totalMismatch`, y
+la que detecta documentos con totales internos inconsistentes.
 
 ---
 
@@ -657,8 +685,11 @@ exportada (patrón `buildExportWhere`).
   otra longitud → E tal cual + anomalía), `toAnexoAmount(decimal)` (`toDecimalPlaces(2,
   ROUND_HALF_UP).toFixed(2)`; negativo → `0.00` + anomalía), `formatFecEmi(date)`
   (`DD/MM/YYYY` con getters UTC), `stripHyphens(codigoGeneracion)`, `resolveClassification`.
-- Columna O = `G + J + N` calculada con `Decimal` sobre componentes ya redondeados, para que
-  la verificación aritmética de Hacienda cierre fila por fila.
+- Columna O = **suma de G a M** calculada con `Decimal` sobre componentes ya redondeados, para
+  que la verificación aritmética de Hacienda cierre fila por fila. N queda fuera: es el crédito
+  fiscal generado por la compra, mientras que O es el total gravado **neto** (ver ADR-10.9).
+  El resumen del export cuenta como anomalía las filas donde `O + N` no reconstruye
+  `montoTotalOperacion`, que es la reconciliación real contra el DTE.
 - `ExportPurchaseBookService.streamRows(ctx, dto, sink)`: cursor `fecEmi asc, id asc` en
   lotes de 500 con `select` mínimo + `receptor.default*`. **Nunca** `findMany` sin `take`.
 - Antes de emitir headers: `count > PURCHASE_BOOK_EXPORT_MAX_ROWS` → `422 EXPORT_TOO_LARGE`;
@@ -976,12 +1007,8 @@ Estimación total: 6–7 días.
 
 ## 13. Riesgos y puntos abiertos
 
-1. **Columna O.** El instructivo dice "total de las columnas G a la M", pero en ambas muestras
-   `montoTotalOperacion = G + J + N` (200.00 y 162.72). Se implementa `G + J + N` en una sola
-   constante de `build-anexo-row.ts` y se **confirma con el contador antes del primer envío
-   real**. Cambiar la fórmula es un cambio de una línea con su test.
-2. **Retenciones.** `ivaRetenido` e `ivaPercibido` no alteran O (se liquidan aparte);
-   confirmar con el contador.
+1. ~~**Columna O.**~~ **Resuelto el 2026-09-07** (ver ADR-10.9): es la suma de G a M, sin N.
+2. **Retenciones.** `ivaRetenido` e `ivaPercibido` no alteran O (se liquidan aparte).
 3. **Identificación del proveedor con longitud distinta de 9 o 14** (proveedores del
    exterior, emisores mal formados): se exporta en E tal cual con contador de anomalías en el
    summary. Un override manual (`anexoSupplierIdOverride`) queda para una iteración futura.
@@ -1009,7 +1036,7 @@ Estimación total: 6–7 días.
 | 0 | ✅ implementada | 2026-09-07 | `write-excel-file@4.1.1` adoptada (auditoría sin hallazgos propios); fixtures en `src/purchase-book/__fixtures__/`; PDF en `docs/reference/`; 4 variables de entorno. |
 | 1 | ✅ implementada | 2026-09-07 | 6 tablas + enum `DteParseStatus`; migración `20260908035947_purchase_book` con GRANT y RLS FORCE escritos a mano. Aislamiento verificado con el rol `maildte_app` (0 filas sin contexto, sin fuga entre tenants). |
 | 2 | ✅ implementada | 2026-09-07 | Parser puro v3/v4 (`parseDte`, `PARSER_VERSION` 1), helpers de acceso JSON, catálogos MH y `buildAnexoRow` con las 21 columnas. 93 tests nuevos. Carpeta verificada sin imports de Nest ni Prisma service. |
-| 3 | pendiente | | |
+| 3 | ✅ implementada | 2026-09-07 | Cola `dte`, `DteEnqueuer`, `DteIngestService`, `DteParseProcessor` y hook en `SyncService.processMessage`. 29 tests nuevos. El backfill se expone en la Fase 4. |
 | 4 | pendiente | | |
 | 5 | pendiente | | |
 | 6 | pendiente | | |

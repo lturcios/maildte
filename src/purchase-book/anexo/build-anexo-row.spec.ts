@@ -77,7 +77,7 @@ describe('buildAnexoRow', () => {
       '0.00', // L importaciones gravadas de bienes
       '0.00', // M importaciones gravadas de servicios
       '23.01', // N crédito fiscal
-      '200.00', // O total de compras = G + J + N
+      '176.99', // O total de compras = suma de G a M (neto, sin el IVA de N)
       '040522092', // P DUI del proveedor (9 dígitos)
       '1', // Q tipo de operación
       '2', // R clasificación
@@ -93,13 +93,45 @@ describe('buildAnexoRow', () => {
     expect(row[3]).toBe('0B4E222174CF4550A45131BBFB5CC9FD');
     expect(row[9]).toBe('144.00');
     expect(row[13]).toBe('18.72');
-    expect(row[14]).toBe('162.72');
+    expect(row[14]).toBe('144.00');
     expect(row[15]).toBe('027561310');
   });
 
-  it('la columna O coincide con montoTotalOperacion en las dos muestras', () => {
-    expect(values(DOC_V3, DEFAULTS)[14]).toBe('200.00');
-    expect(values(DOC_V4, DEFAULTS)[14]).toBe('162.72');
+  describe('columna O: total de compras', () => {
+    it('es la suma de G a M, sin incluir el crédito fiscal de N', () => {
+      // Muestra v3: G = 0.00, J = 176.99, resto 0.00 → O = 176.99 (neto).
+      // El IVA de 23.01 vive en N y no se suma: O es el total gravado NETO.
+      expect(values(DOC_V3, DEFAULTS)[14]).toBe('176.99');
+      // Muestra v4: G = 0.00, J = 144.00 → O = 144.00, no 162.72.
+      expect(values(DOC_V4, DEFAULTS)[14]).toBe('144.00');
+    });
+
+    it('coincide con J cuando no hay exentas ni no sujetas', () => {
+      const row = values(DOC_V4, DEFAULTS);
+      expect(row[14]).toBe(row[9]);
+    });
+
+    it('incluye las exentas y no sujetas de la columna G', () => {
+      const row = values({ ...DOC_V4, totalExenta: d('10'), totalNoSuj: d('5.50') }, DEFAULTS);
+      expect(row[6]).toBe('15.50');
+      expect(row[14]).toBe('159.50');
+    });
+
+    it('nunca es mayor que montoTotalOperacion, porque ese incluye el IVA', () => {
+      for (const doc of [DOC_V3, DOC_V4]) {
+        const o = new Prisma.Decimal(values(doc, DEFAULTS)[14]);
+        expect(o.lessThanOrEqualTo(doc.montoTotalOperacion)).toBe(true);
+      }
+    });
+
+    it('O más N reconstruye montoTotalOperacion en las dos muestras', () => {
+      for (const doc of [DOC_V3, DOC_V4]) {
+        const row = values(doc, DEFAULTS);
+        const o = new Prisma.Decimal(row[14]);
+        const n = new Prisma.Decimal(row[13]);
+        expect(o.plus(n).toFixed(2)).toBe(doc.montoTotalOperacion.toFixed(2));
+      }
+    });
   });
 
   it('mantiene las constantes del anexo en B y U', () => {
@@ -218,9 +250,14 @@ describe('buildAnexoRow', () => {
       expect(result.cells[9].value).toBe('0.00');
     });
 
-    it('detecta cuando G + J + N no coincide con montoTotalOperacion', () => {
+    it('detecta cuando O + N no reconstruye montoTotalOperacion', () => {
       const result = buildAnexoRow({ ...DOC_V4, montoTotalOperacion: d('999.99') }, DEFAULTS);
       expect(result.flags.totalMismatch).toBe(true);
+    });
+
+    it('no marca el documento sano, donde O + N sí cierra', () => {
+      // v4: O = 144.00, N = 18.72, montoTotalOperacion = 162.72.
+      expect(buildAnexoRow(DOC_V4, DEFAULTS).flags.totalMismatch).toBe(false);
     });
 
     it('tolera una diferencia de un centavo sin marcarla', () => {

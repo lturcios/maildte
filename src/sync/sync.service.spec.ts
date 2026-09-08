@@ -10,6 +10,10 @@ import { ImapClientFactory } from './imap/imap-client.factory';
 import { SyncScheduler } from './sync.scheduler';
 import { REDIS_CONNECTION } from '../redis/redis.constants';
 import { fakeRawEmail, imapFlowMock } from './imap/imap-test-utils';
+import { DteEnqueuer } from '../purchase-book/queue/dte-enqueuer';
+
+/** El sync encola el parseo del libro de compras tras persistir el correo. */
+const dteEnqueuer = { enqueueParseBulk: jest.fn() };
 
 const DATE = 'Tue, 08 Sep 2026 15:00:00 -0600';
 const TENANT_ID = 'tenant-1';
@@ -94,7 +98,8 @@ describe('SyncService', () => {
     prismaMock.syncLog.update.mockResolvedValue({});
     prismaMock.syncLog.create.mockResolvedValue({ id: 'log-1' });
     prismaMock.processedEmail.findUnique.mockResolvedValue(null);
-    prismaMock.processedEmail.create.mockResolvedValue({ id: 'email-1' });
+    prismaMock.processedEmail.create.mockResolvedValue({ id: 'email-1', attachments: [] });
+    dteEnqueuer.enqueueParseBulk.mockResolvedValue(0);
     prismaMock.tenant.findUnique.mockResolvedValue({
       status: 'ACTIVO',
       slug: TENANT_SLUG,
@@ -157,6 +162,7 @@ describe('SyncService', () => {
         { provide: StorageService, useValue: storage },
         { provide: AppConfigService, useValue: config },
         { provide: SyncScheduler, useValue: scheduler },
+        { provide: DteEnqueuer, useValue: dteEnqueuer },
         { provide: REDIS_CONNECTION, useValue: redis },
         {
           provide: PinoLogger,
@@ -363,6 +369,151 @@ describe('SyncService', () => {
       const finalLog = prismaMock.syncLog.update.mock.calls.at(-1)?.[0];
       expect(finalLog.data.status).toBe('COMPLETADO_CON_ERRORES');
       expect(finalLog.data.emailsProcessed).toBe(2);
+    });
+  });
+
+  describe('encolado del libro de compras (Addendum 10)', () => {
+    const jsonAttachment = {
+      filename: 'factura.json',
+      contentType: 'application/json',
+      body: '{}',
+    };
+    const pdfAttachment = {
+      filename: 'factura.pdf',
+      contentType: 'application/pdf',
+      body: '%PDF-1.4',
+    };
+
+    /** Simula el create con el select de ids que agregó el hook. */
+    function createReturns(attachments: { id: string; fileType: 'JSON' | 'PDF' }[]): void {
+      prismaMock.processedEmail.create.mockResolvedValue({ id: 'email-1', attachments });
+    }
+
+    it('encola solo los adjuntos JSON, nunca los PDF', async () => {
+      createReturns([
+        { id: 'att-json', fileType: 'JSON' },
+        { id: 'att-pdf', fileType: 'PDF' },
+      ]);
+      imap.create.mockReturnValue(
+        imapFlowMock([
+          {
+            uid: 6,
+            source: fakeRawEmail({
+              messageId: 'msg-6',
+              from: 'a@b.com',
+              date: DATE,
+              attachments: [jsonAttachment, pdfAttachment],
+            }),
+          },
+        ]),
+      );
+
+      await syncAccount();
+
+      expect(dteEnqueuer.enqueueParseBulk).toHaveBeenCalledWith(
+        [{ tenantId: TENANT_ID, attachmentId: 'att-json' }],
+        'sync',
+      );
+    });
+
+    it('no encola nada cuando el correo solo trae PDF', async () => {
+      createReturns([{ id: 'att-pdf', fileType: 'PDF' }]);
+      imap.create.mockReturnValue(
+        imapFlowMock([
+          {
+            uid: 6,
+            source: fakeRawEmail({
+              messageId: 'msg-6',
+              from: 'a@b.com',
+              date: DATE,
+              attachments: [pdfAttachment],
+            }),
+          },
+        ]),
+      );
+
+      await syncAccount();
+
+      expect(dteEnqueuer.enqueueParseBulk).toHaveBeenCalledWith([], 'sync');
+    });
+
+    it('un fallo al encolar no marca el correo como ERROR', async () => {
+      // El correo ya está archivado en disco y en base: que Redis esté caído no
+      // puede degradar su estado. El backfill lo recupera después.
+      createReturns([{ id: 'att-json', fileType: 'JSON' }]);
+      dteEnqueuer.enqueueParseBulk.mockRejectedValue(new Error('Redis caído'));
+      imap.create.mockReturnValue(
+        imapFlowMock([
+          {
+            uid: 6,
+            source: fakeRawEmail({
+              messageId: 'msg-6',
+              from: 'a@b.com',
+              date: DATE,
+              attachments: [jsonAttachment],
+            }),
+          },
+        ]),
+      );
+
+      await syncAccount();
+
+      expect(prismaMock.processedEmail.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'PROCESADO' }),
+        }),
+      );
+      const finalLog = prismaMock.syncLog.update.mock.calls.at(-1)?.[0];
+      expect(finalLog.data.status).toBe('COMPLETADO');
+    });
+
+    it('un fallo al encolar NO borra los archivos ya guardados en disco', async () => {
+      // Regresion: el encolado vivia dentro del try de la transaccion, asi que
+      // un Redis caido disparaba el rollback y borraba adjuntos ya archivados.
+      createReturns([{ id: 'att-json', fileType: 'JSON' }]);
+      dteEnqueuer.enqueueParseBulk.mockRejectedValue(new Error('Redis caido'));
+      imap.create.mockReturnValue(
+        imapFlowMock([
+          {
+            uid: 6,
+            source: fakeRawEmail({
+              messageId: 'msg-6',
+              from: 'a@b.com',
+              date: DATE,
+              attachments: [jsonAttachment],
+            }),
+          },
+        ]),
+      );
+
+      await syncAccount();
+
+      expect(storage.deleteFiles).not.toHaveBeenCalled();
+    });
+
+    it('pide los ids de los adjuntos en el create, sin los cuales no se puede encolar', async () => {
+      createReturns([{ id: 'att-json', fileType: 'JSON' }]);
+      imap.create.mockReturnValue(
+        imapFlowMock([
+          {
+            uid: 6,
+            source: fakeRawEmail({
+              messageId: 'msg-6',
+              from: 'a@b.com',
+              date: DATE,
+              attachments: [jsonAttachment],
+            }),
+          },
+        ]),
+      );
+
+      await syncAccount();
+
+      expect(prismaMock.processedEmail.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          select: { attachments: { select: { id: true, fileType: true } } },
+        }),
+      );
     });
   });
 
