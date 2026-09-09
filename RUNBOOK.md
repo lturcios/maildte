@@ -334,6 +334,13 @@ seis tablas nuevas (`dte_parties`, `dte_parse_results`, `purchase_documents`,
 ninguna fila existente ni toca ninguna tabla anterior, así que la sincronización
 de correo sigue corriendo durante todo el despliegue.
 
+> **Despliegues posteriores del libro de compras.** Este §2.c es el del Addendum
+> 10, que estrena la funcionalidad. La fase 1 del Addendum 11 (actividad
+> económica del receptor y clave canónica del contribuyente) se despliega sobre
+> lo de acá y tiene su propio procedimiento en el **§9.b**: misma migración
+> aditiva sin ventana de servicio, pero con un backfill obligatorio en modo
+> `failed` porque sube `PARSER_VERSION`.
+
 ### 1. Traer el código y reconstruir
 
 ```bash
@@ -1032,7 +1039,8 @@ incorpora. El reprocesamiento manual hace falta en tres situaciones:
    encolado no puede hacer fallar el archivado, a propósito), pero el trabajo
    nunca llegó a la cola.
 3. **Al subir `PARSER_VERSION`** — hay documentos leídos con una versión
-   anterior de la normalización.
+   anterior del contrato del parser. El caso concreto más reciente es la fase 1
+   del Addendum 11, con su procedimiento completo en el **§9.b**.
 
 ### Diferencia con el §6
 
@@ -1144,6 +1152,109 @@ Estados y qué significan:
 | `ERROR` | Faltan campos obligatorios o tienen un tipo inesperado. `errorDetail` lista cada uno con su ruta (`resumen.totalGravada: campo obligatorio ausente`). | Sí: el DTE está mal formado en origen. |
 
 Tras corregir la causa, `mode=failed` vuelve a intentar solo lo que falló.
+
+### 9.b Despliegue del Addendum 11, fase 1 (actividad del receptor y clave canónica)
+
+La fase 1 del Addendum 11 agrega tres columnas y **sube `PARSER_VERSION` de 1 a
+2**. La migración `20260909075552_addendum_11_receptor_actividad_canonical_key`
+es aditiva (`receptorCodActividad` y `receptorDescActividad` en
+`purchase_documents`, `canonicalKey` en `dte_parties`, las tres anulables y sin
+constraint), así que **no hace falta ventana de servicio** y se aplica con el
+mismo paso 2 del §2.c.
+
+**El backfill NO es opcional.** La migración deja las columnas nuevas en `NULL`
+para todo el histórico: el dato existe en los JSON archivados, pero hasta que no
+se relean, el libro no tiene ni una sola actividad de receptor ni una sola clave
+canónica, y la consulta del gate de abajo devuelve todo vacío. Tras aplicar la
+migración y reiniciar API y worker, correr el backfill en **modo `failed`**, que
+es el que alcanza a los documentos leídos con `parserVersion` anterior:
+
+```bash
+cd /opt/maildte
+
+# Ensayo primero, igual que en el §2.c paso 6
+docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed --dry-run
+
+# La corrida de verdad
+docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed
+```
+
+El seguimiento del consumo y los tres desenlaces posibles están en el **§2.c
+paso 7**: la cola es la misma y se leen igual. El re-parseo **conserva la
+clasificación manual Q–T** de cada documento (`anexo*`, `classifiedById`,
+`classifiedAt`): el re-parseo actualiza el documento existente, no lo reemplaza.
+
+**Verificar que el backfill efectivamente pobló las columnas** — si esto da 0,
+el backfill no corrió o no se consumió, y la consulta del gate no significa nada:
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres   psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           count(*)                              AS documentos,
+           count(d.\"receptorCodActividad\")       AS con_actividad,
+           count(*) FILTER (WHERE d.\"parserVersion\" >= 2) AS con_parser_2
+    FROM purchase_documents d
+    JOIN tenants t ON t.id = d.\"tenantId\"
+    GROUP BY t.slug
+    ORDER BY t.slug;
+  "
+```
+
+#### La consulta del gate de la fase
+
+Es la razón de ser de la fase 1: mirar la data real antes de mover la identidad
+en la fase 2. Responde las dos preguntas del addendum — **cuántas actividades
+distintas** aparecen en los documentos de cada contribuyente, y **con qué
+identificadores lo referencian sus proveedores**. Se agrupa por `canonicalKey`,
+que es justamente la clave que la fase 2 va a convertir en la identidad, así que
+las filas con `partes > 1` son las que hoy están partidas.
+
+`psql` entra como el rol owner (`maildte`), que es superusuario y **no** está
+sujeto al RLS que sí limita a `maildte_app`: por eso ve todos los tenants.
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres   psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           p.\"canonicalKey\",
+           min(p.nombre)                                  AS nombre,
+           count(DISTINCT p.id)                           AS partes,
+           string_agg(DISTINCT p.nit, ', ' ORDER BY p.nit) AS identificadores,
+           count(d.id)                                    AS documentos,
+           count(DISTINCT d.\"receptorCodActividad\")       AS actividades,
+           string_agg(DISTINCT d.\"receptorCodActividad\", ', '
+                      ORDER BY d.\"receptorCodActividad\")  AS codigos_actividad
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    LEFT JOIN purchase_documents d ON d.\"receptorId\" = p.id
+    WHERE p.\"seenAsReceptor\"
+    GROUP BY t.slug, p.\"canonicalKey\"
+    ORDER BY t.slug, count(d.id) DESC;
+  "
+```
+
+Cómo se lee cada fila:
+
+| Columna | Qué dice |
+|---|---|
+| `partes` | `> 1` es un contribuyente **partido**: la fase 2 lo va a fusionar. Exportar el Anexo 3 de una de esas partes deja las compras de la otra fuera de la declaración, sin error y sin aviso. |
+| `identificadores` | Los NIT/DUI con los que lo referencian sus proveedores. Es la evidencia de la fusión. |
+| `actividades` | `> 1` es un contribuyente que opera con varias actividades económicas: el caso que justifica la segmentación de la fase 3. |
+| `canonicalKey` en `NULL` | La parte no trae NRC y su identificador no mide 9 ni 14 dígitos. No se le inventó una clave: hay que mirarla a mano antes de la fase 2. |
+
+Contribuyentes partidos, solos, que es la lista que la fase 2 tiene que fusionar:
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres   psql -U maildte -d maildte -c "
+    SELECT t.slug, p.\"canonicalKey\", count(*) AS partes,
+           string_agg(p.nit, ', ' ORDER BY p.nit) AS identificadores
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    WHERE p.\"canonicalKey\" IS NOT NULL
+    GROUP BY t.slug, p.\"canonicalKey\"
+    HAVING count(*) > 1
+    ORDER BY t.slug;
+  "
+```
 
 ### Seguir el trabajo en los logs del worker
 

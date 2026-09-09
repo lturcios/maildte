@@ -491,6 +491,8 @@ export interface PurchaseDocumentListItem extends AnexoOverrides {
   emisorNombre: string;
   receptorNit: string;
   receptorNombre: string;
+  /** Addendum 11, fase 1: viaja en la respuesta; todavía no hay filtro ni UI. */
+  receptorCodActividad: string | null;
   totalExenta: string;
   totalNoSuj: string;
   totalGravada: string;
@@ -566,6 +568,8 @@ export interface PurchaseDocumentDetail extends AnexoOverrides {
   receptorNrc: string | null;
   receptorNombre: string;
   receptorNombreComercial: string | null;
+  receptorCodActividad: string | null;
+  receptorDescActividad: string | null;
   totalNoSuj: string;
   totalExenta: string;
   totalGravada: string;
