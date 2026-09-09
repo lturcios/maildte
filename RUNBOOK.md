@@ -1169,15 +1169,27 @@ canónica, y la consulta del gate de abajo devuelve todo vacío. Tras aplicar la
 migración y reiniciar API y worker, correr el backfill en **modo `failed`**, que
 es el que alcanza a los documentos leídos con `parserVersion` anterior:
 
+Corre **fuera** del contenedor, igual que en el §2.c paso 6 y por la misma
+razón: la imagen de producción no trae `ts-node` — ni `pnpm`. Adentro del
+contenedor el entrypoint de `node:20-alpine` antepone `node` al primer argumento
+que no sea un ejecutable del PATH, así que el intento falla con un
+`MODULE_NOT_FOUND` de `/app/pnpm` que no menciona la causa real.
+
 ```bash
 cd /opt/maildte
+pnpm install                 # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate    # explícito, por si el postinstall no corrió
 
-# Ensayo primero, igual que en el §2.c paso 6
-docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed --dry-run
+# 1. Ensayo: cuenta qué se encolaría, sin tocar Redis
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 pnpm run backfill:purchase-book -- --mode=failed --dry-run
 
-# La corrida de verdad
-docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed
+# 2. La corrida de verdad
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 pnpm run backfill:purchase-book -- --mode=failed
 ```
+
+`REDIS_URL` apunta al puerto **publicado** (`127.0.0.1:6380`), no al nombre de
+servicio interno `redis:6379` del `.env`. Ver el §2.c paso 6 para el detalle de
+la clave y de los desenlaces posibles.
 
 El seguimiento del consumo y los tres desenlaces posibles están en el **§2.c
 paso 7**: la cola es la misma y se leen igual. El re-parseo **conserva la
