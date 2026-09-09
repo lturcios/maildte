@@ -42,6 +42,13 @@ export class DteEnqueuer {
    * caído, el correo ya quedó archivado y el backfill (`mode=missing`) recupera
    * lo que no se encoló. Reventar acá marcaría como ERROR un correo que se
    * descargó bien.
+   *
+   * **Devuelve cuántos trabajos aceptó la cola. Un valor menor que
+   * `targets.length` significa que el lote SE PERDIÓ y TODO llamador está
+   * obligado a comparar el retorno contra lo que pidió.** No hacerlo es
+   * exactamente lo que dejó al libro de compras vacío en silencio: un `jobId`
+   * con `:` hacía lanzar a `addBulk`, este método se tragaba la excepción y
+   * devolvía 0, y nadie miraba el número (ver `dteParseJobId`).
    */
   async enqueueParseBulk(
     targets: EnqueueParseTarget[],
@@ -66,9 +73,12 @@ export class DteEnqueuer {
       );
       return targets.length;
     } catch (err) {
-      this.logger.warn(
-        { err, count: targets.length, trigger },
-        'No se pudo encolar el parseo de DTE; se recuperará con el reprocesamiento',
+      // ERROR y no WARN a propósito: un lote que nunca llega a la cola es una
+      // falla, y el único aviso de que el libro de compras se está quedando
+      // vacío. WARN no dispara alertas; nadie lo mira.
+      this.logger.error(
+        { err, count: targets.length, trigger, force },
+        'No se pudo encolar el parseo de DTE; el lote se perdió y se recuperará con el reprocesamiento',
       );
       return 0;
     }

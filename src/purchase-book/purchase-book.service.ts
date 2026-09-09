@@ -1,4 +1,9 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -160,6 +165,54 @@ export function buildUnclassifiedWhere(
       { OR: unclassifiedConditions() },
     ],
   };
+}
+
+/**
+ * Selección de adjuntos JSON a re-encolar según el modo del backfill.
+ *
+ * Exportada y pura a propósito: la comparten el endpoint
+ * `POST /purchase-book/reprocess` (un tenant, con token ADMIN) y el script de
+ * mantenimiento `scripts/backfill-purchase-book.ts` (todos los tenants, desde
+ * el host del VPS). Si cada uno armara su propio `where`, un cambio de modo se
+ * aplicaría en una vía y no en la otra.
+ */
+export function buildReprocessWhere(
+  tenantId: string,
+  dto: ReprocessDto,
+): Prisma.AttachmentWhereInput {
+  const where: Prisma.AttachmentWhereInput = { tenantId, fileType: 'JSON' };
+
+  const email: Prisma.ProcessedEmailWhereInput = {};
+  if (dto.accountId) email.accountId = dto.accountId;
+  if (dto.month) email.monthFolder = dto.month;
+  if (dto.from || dto.to) {
+    email.receivedAt = {
+      ...(dto.from ? { gte: rangeStart(dto.from) } : {}),
+      ...(dto.to ? { lte: rangeEnd(dto.to) } : {}),
+    };
+  }
+  if (Object.keys(email).length > 0) where.email = email;
+
+  if (dto.mode === 'missing') {
+    where.parseResult = { is: null };
+  } else if (dto.mode === 'failed') {
+    // Sin ledger, con un estado de error, o parseado por una versión anterior
+    // del parser (que es el caso al subir PARSER_VERSION).
+    where.OR = [
+      { parseResult: { is: null } },
+      {
+        parseResult: {
+          status: {
+            in: ['ERROR', 'JSON_INVALIDO', 'ARCHIVO_FALTANTE', 'ARCHIVO_DEMASIADO_GRANDE'],
+          },
+        },
+      },
+      { parseResult: { parserVersion: { lt: PARSER_VERSION } } },
+    ];
+  }
+  // `all` no agrega condición: re-parsea todo el filtro con force.
+
+  return where;
 }
 
 @Injectable()
@@ -349,7 +402,7 @@ export class PurchaseBookService {
       this.config.purchaseBookReprocessBatch,
     );
 
-    const where = this.buildReprocessWhere(tenantId, dto);
+    const where = buildReprocessWhere(tenantId, dto);
 
     const rows = await this.prisma.withTenant(tenantId, (tx) =>
       tx.attachment.findMany({
@@ -370,48 +423,30 @@ export class PurchaseBookService {
       dto.mode === 'all',
     );
 
+    // A diferencia del sync, acá encolar ES el trabajo pedido y hay una persona
+    // esperando la respuesta. `enqueueParseBulk` no lanza y devuelve cuántos
+    // aceptó la cola: si aceptó menos de los que había en la página, el lote se
+    // perdió y devolver `{ enqueued: 0 }` con un 201 le mentiría al operador,
+    // que se iría creyendo que no había nada que reprocesar. La condición exige
+    // `page.length > 0` porque "no hay nada que encolar" es un 0 legítimo.
+    if (page.length > 0 && enqueued !== page.length) {
+      this.logger.error(
+        { tenantId, mode: dto.mode, requested: page.length, enqueued, actorId: ctx.actor.id },
+        'La cola no aceptó el reprocesamiento del libro de compras; el lote se perdió',
+      );
+      throw new ServiceUnavailableException({
+        error: 'PURCHASE_BOOK_QUEUE_UNAVAILABLE',
+        message:
+          'La cola de procesamiento no está aceptando trabajos; no se encoló el reprocesamiento. Reintentá más tarde.',
+      });
+    }
+
     this.logger.info(
       { tenantId, mode: dto.mode, enqueued, actorId: ctx.actor.id },
       'Reprocesamiento del libro de compras encolado',
     );
 
     return { enqueued, nextCursor: hasMore ? page[page.length - 1].id : null };
-  }
-
-  private buildReprocessWhere(tenantId: string, dto: ReprocessDto): Prisma.AttachmentWhereInput {
-    const where: Prisma.AttachmentWhereInput = { tenantId, fileType: 'JSON' };
-
-    const email: Prisma.ProcessedEmailWhereInput = {};
-    if (dto.accountId) email.accountId = dto.accountId;
-    if (dto.month) email.monthFolder = dto.month;
-    if (dto.from || dto.to) {
-      email.receivedAt = {
-        ...(dto.from ? { gte: rangeStart(dto.from) } : {}),
-        ...(dto.to ? { lte: rangeEnd(dto.to) } : {}),
-      };
-    }
-    if (Object.keys(email).length > 0) where.email = email;
-
-    if (dto.mode === 'missing') {
-      where.parseResult = { is: null };
-    } else if (dto.mode === 'failed') {
-      // Sin ledger, con un estado de error, o parseado por una versión anterior
-      // del parser (que es el caso al subir PARSER_VERSION).
-      where.OR = [
-        { parseResult: { is: null } },
-        {
-          parseResult: {
-            status: {
-              in: ['ERROR', 'JSON_INVALIDO', 'ARCHIVO_FALTANTE', 'ARCHIVO_DEMASIADO_GRANDE'],
-            },
-          },
-        },
-        { parseResult: { parserVersion: { lt: PARSER_VERSION } } },
-      ];
-    }
-    // `all` no agrega condición: re-parsea todo el filtro con force.
-
-    return where;
   }
 
   // -------------------------------------------------------------------------

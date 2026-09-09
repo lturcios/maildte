@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { PinoLogger } from 'nestjs-pino';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import {
   buildPurchaseDocumentWhere,
@@ -171,6 +171,13 @@ const prismaMock = {
 };
 
 const enqueuerMock = { enqueueParseBulk: jest.fn() };
+const loggerMock = {
+  setContext: jest.fn(),
+  info: jest.fn(),
+  debug: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+};
 const configMock = { purchaseBookReprocessBatch: 1000 };
 
 describe('PurchaseBookService', () => {
@@ -195,10 +202,7 @@ describe('PurchaseBookService', () => {
         { provide: PrismaService, useValue: prismaMock },
         { provide: AppConfigService, useValue: configMock },
         { provide: DteEnqueuer, useValue: enqueuerMock },
-        {
-          provide: PinoLogger,
-          useValue: { setContext: jest.fn(), info: jest.fn(), debug: jest.fn(), warn: jest.fn() },
-        },
+        { provide: PinoLogger, useValue: loggerMock },
       ],
     }).compile();
 
@@ -432,6 +436,58 @@ describe('PurchaseBookService', () => {
       await expect(service.reprocess(superadminCtx, reprocessDto())).rejects.toThrow(
         ForbiddenException,
       );
+    });
+
+    /**
+     * Regresión del punto ciego que dejó el libro de compras vacío durante siete
+     * fases: `enqueueParseBulk` no lanza, devuelve cuántos trabajos aceptó la
+     * cola, y nadie comparaba ese número contra lo pedido. Acá hay una persona
+     * esperando la respuesta HTTP, así que devolver `{ enqueued: 0 }` con un 201
+     * le diría "no había nada que reprocesar" cuando en realidad se perdió el
+     * lote entero. 503 porque la cola no acepta trabajo: reintentar más tarde.
+     */
+    it('503 PURCHASE_BOOK_QUEUE_UNAVAILABLE si la cola no acepta el lote', async () => {
+      prismaMock.attachment.findMany.mockResolvedValue([{ id: 'att-1' }, { id: 'att-2' }]);
+      enqueuerMock.enqueueParseBulk.mockResolvedValue(0);
+
+      await expect(service.reprocess(adminCtx, reprocessDto())).rejects.toMatchObject({
+        response: {
+          error: 'PURCHASE_BOOK_QUEUE_UNAVAILABLE',
+          message: expect.stringContaining('cola de procesamiento'),
+        },
+      });
+      await expect(service.reprocess(adminCtx, reprocessDto())).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(loggerMock.error).toHaveBeenCalledWith(
+        expect.objectContaining({ requested: 2, enqueued: 0 }),
+        expect.stringContaining('el lote se perdió'),
+      );
+    });
+
+    it('también falla si la cola acepta solo una parte del lote', async () => {
+      prismaMock.attachment.findMany.mockResolvedValue([{ id: 'att-1' }, { id: 'att-2' }]);
+      enqueuerMock.enqueueParseBulk.mockResolvedValue(1);
+
+      await expect(service.reprocess(adminCtx, reprocessDto())).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+    });
+
+    /**
+     * El contrapunto obligatorio del caso anterior: "no hay nada que encolar" es
+     * un 0 legítimo y NO puede confundirse con "se perdió el lote". Sin esta
+     * guarda, un tenant con todo parseado recibiría un 503 en cada llamada.
+     */
+    it('no falla cuando no hay ningún adjunto que encolar', async () => {
+      prismaMock.attachment.findMany.mockResolvedValue([]);
+      enqueuerMock.enqueueParseBulk.mockResolvedValue(0);
+
+      await expect(service.reprocess(adminCtx, reprocessDto())).resolves.toEqual({
+        enqueued: 0,
+        nextCursor: null,
+      });
+      expect(loggerMock.error).not.toHaveBeenCalled();
     });
   });
 });

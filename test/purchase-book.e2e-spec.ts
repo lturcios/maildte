@@ -530,6 +530,33 @@ describe('Libro de compras (e2e)', () => {
       expect(res.body.data.nextCursor).toBeNull();
     });
 
+    /**
+     * Regresión: hasta acá ninguna prueba encolaba de verdad. `enqueueParseBulk`
+     * captura los errores de BullMQ y devuelve 0 (encolar no puede hacer fallar
+     * el archivado del correo), así que un `jobId` inválido dejaba la cola vacía
+     * sin que ningún test ni ningún log lo notara. Este caso sí exige que el
+     * adjunto llegue a la cola.
+     *
+     * Va después del caso "no encola nada": deja un adjunto sin parsear.
+     */
+    it('modo missing encola el adjunto que todavía no pasó por el parser', async () => {
+      await seedDteAttachment({
+        tenant: tenantA,
+        accountId: accountA1,
+        folderName: 'compras_a1',
+        dte: ccfV4,
+        fileName: 'sin-parsear.json',
+      });
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/purchase-book/reprocess')
+        .set('Authorization', `Bearer ${adminTokenA}`)
+        .send({ mode: 'missing' });
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.enqueued).toBe(1);
+    });
+
     it('rechaza un modo desconocido', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/purchase-book/reprocess')

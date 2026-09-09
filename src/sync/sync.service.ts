@@ -501,21 +501,41 @@ export class SyncService {
     return { status: 'processed', filesSaved: saved.length };
   }
 
-  /** Encola el parseo del libro de compras sin poder afectar al correo ya archivado. */
+  /**
+   * Encola el parseo del libro de compras sin poder afectar al correo ya
+   * archivado. Las dos mitades importan y hay que leerlas juntas:
+   *
+   * 1. NO falla. El correo ya está en disco y en base; degradarlo a ERROR
+   *    porque Redis no contesta sería peor que no encolar.
+   * 2. Pero GRITA. `enqueueParseBulk` no lanza: devuelve cuántos trabajos
+   *    aceptó la cola. Si acepta menos de los pedidos, ese lote se perdió y el
+   *    libro de compras se queda sin esos DTE hasta que alguien corra el
+   *    backfill. Ignorar ese número fue lo que dejó la cola vacía durante siete
+   *    fases sin que ninguna prueba ni ningún log lo delataran.
+   */
   private async enqueuePurchaseBookParse(
     tenantId: string,
     attachmentIds: string[],
     logCtx: Record<string, unknown>,
   ): Promise<void> {
     try {
-      await this.dteEnqueuer.enqueueParseBulk(
+      const accepted = await this.dteEnqueuer.enqueueParseBulk(
         attachmentIds.map((attachmentId) => ({ tenantId, attachmentId })),
         'sync',
       );
+      if (accepted !== attachmentIds.length) {
+        this.logger.error(
+          { ...logCtx, requested: attachmentIds.length, accepted },
+          'La cola no aceptó el parseo del libro de compras; el lote se perdió y hay que reprocesar',
+        );
+      }
     } catch (err) {
-      this.logger.warn(
-        { ...logCtx, err },
-        'No se pudo encolar el parseo del libro de compras; se recuperará con el reprocesamiento',
+      // `enqueueParseBulk` no lanza por contrato. Esta red queda igual: si
+      // alguna vez ese contrato se rompe, el fallo tiene que seguir sin poder
+      // tocar un correo ya archivado, y tiene que verse.
+      this.logger.error(
+        { ...logCtx, err, requested: attachmentIds.length },
+        'Fallo inesperado al encolar el parseo del libro de compras; el lote se perdió y hay que reprocesar',
       );
     }
   }

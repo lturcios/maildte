@@ -28,7 +28,15 @@ export interface DteParseJobData {
  * Id determinístico del job: dos encolados del mismo adjunto colapsan en uno
  * mientras el primero siga en la cola. Es la primera línea de idempotencia;
  * la segunda es el ledger en `DteIngestService`.
+ *
+ * El separador es un guion, NO dos puntos: BullMQ valida el `jobId` propio y
+ * rechaza los que contienen `:` salvo que tengan exactamente dos (compatibilidad
+ * con los ids viejos de jobs repetibles) — `Job.validateOptions`, error
+ * "Custom Id cannot contain :". Con `dte:<uuid>` el `addBulk` lanzaba,
+ * `enqueueParseBulk` se tragaba la excepción (por diseño: encolar no puede
+ * hacer fallar el archivado del correo) y devolvía 0, así que NINGÚN adjunto
+ * llegaba nunca a la cola y el libro de compras quedaba vacío en silencio.
  */
 export function dteParseJobId(attachmentId: string): string {
-  return `dte:${attachmentId}`;
+  return `dte-${attachmentId}`;
 }
