@@ -75,7 +75,9 @@ pnpm test:e2e           # requiere Postgres y Redis levantados
 pnpm lint
 pnpm build
 
-pnpm --dir web lint     # panel web
+pnpm --dir web test     # panel web (Vitest + Testing Library)
+pnpm --dir web test:watch
+pnpm --dir web lint
 pnpm --dir web build
 pnpm --dir web dev
 ```
@@ -84,6 +86,6 @@ pnpm --dir web dev
 1. Compila con `pnpm build` sin warnings de TS.
 2. `pnpm lint` limpio.
 3. Tests de la funcionalidad pasan (`pnpm test`; `pnpm test:e2e` si tocaste esquema, RLS o endpoints).
-4. Si tocaste `web/`: `pnpm --dir web lint` y `pnpm --dir web build` limpios.
+4. Si tocaste `web/`: `pnpm --dir web test`, `pnpm --dir web lint` y `pnpm --dir web build` limpios.
 5. Sin `any`, sin `console.log`, sin secrets hardcodeados.
 6. Reglas de este archivo verificadas contra el diff.
