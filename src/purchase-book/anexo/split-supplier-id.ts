@@ -18,6 +18,8 @@
  * en el resumen antes de enviar el archivo. Nunca se inventa un identificador.
  */
 
+import { onlyDigits } from '../identity/digits';
+
 export interface SupplierId {
   /** Columna E. Cadena vacía cuando corresponde llenar el DUI. */
   nit: string;
@@ -37,7 +39,10 @@ const DUI_LENGTH = 9;
  * exige el número sin separadores y los emisores no son consistentes.
  */
 export function splitSupplierId(raw: string | null | undefined): SupplierId {
-  const digits = (raw ?? '').replace(/\D/g, '');
+  // `onlyDigits` es el mismo normalizador que usa la clave canónica del
+  // contribuyente (Addendum 11, §2): el identificador con el que se agrupa una
+  // parte y el que se exporta en E/P tienen que salir de la misma definición.
+  const digits = onlyDigits(raw);
 
   if (digits.length === NIT_LENGTH) {
     return { nit: digits, dui: '', anomalous: false };

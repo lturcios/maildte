@@ -8,6 +8,7 @@ import { PrismaClient } from '@prisma/client';
 import { AppModule } from '../src/app.module';
 import { DteIngestService } from '../src/purchase-book/ingest/dte-ingest.service';
 import { PurchaseBookIngestModule } from '../src/purchase-book/ingest/purchase-book-ingest.module';
+import { PARSER_VERSION } from '../src/purchase-book/parser/dte-parser';
 import { createSeedClient, seedApiKey, seedTenant, seedUser } from './helpers/tenant-fixtures';
 import ccfV3 from '../src/purchase-book/__fixtures__/ccf-v3.json';
 import ccfV4 from '../src/purchase-book/__fixtures__/ccf-v4.json';
@@ -253,6 +254,89 @@ describe('Libro de compras (e2e)', () => {
       });
       expect(results).toHaveLength(2);
       expect(results.every((r) => r.status === 'PARSEADO')).toBe(true);
+    });
+
+    it('el detalle trae la actividad económica del receptor', async () => {
+      // Addendum 11, §1.2. Las dos muestras traen `receptor.codActividad` y
+      // `receptor.descActividad`, así que el caso se verifica en v3 y en v4.
+      const v4 = await get(`/purchase-book/documents/${docV4Id}`);
+      expect(v4.status).toBe(200);
+      expect(v4.body.data.receptorCodActividad).toBe('46900');
+      expect(v4.body.data.receptorDescActividad).toBe('Venta al por mayor de otros productos');
+
+      const v3 = await get(`/purchase-book/documents/${docV3Id}`);
+      expect(v3.status).toBe(200);
+      expect(v3.body.data.receptorCodActividad).toBe('56101');
+      expect(v3.body.data.receptorDescActividad).toBe('Restaurantes');
+    });
+
+    it('el listado también expone la actividad del receptor', async () => {
+      const res = await get(`/purchase-book/documents?receptorId=${receptorV4Id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.data[0].receptorCodActividad).toBe('46900');
+    });
+
+    it('guarda la clave canónica de las partes sin cambiar su identidad', async () => {
+      // Fase 1: se calcula y se guarda, pero `@@unique([tenantId, nit])` sigue
+      // siendo la identidad. ccf-v4: receptor nrc 54038.
+      const receptor = await prisma.dteParty.findUnique({
+        where: { id: receptorV4Id },
+        select: { nit: true, nrc: true, canonicalKey: true },
+      });
+      expect(receptor?.nrc).toBe('54038');
+      expect(receptor?.canonicalKey).toBe('54038');
+      expect(receptor?.nit).toBe(RECEPTOR_V4_NIT);
+    });
+
+    it('re-parsea sin force un documento leído con un parserVersion anterior', async () => {
+      // Es el camino de `mode=failed` del backfill (RUNBOOK §9), que NO manda
+      // force: solo `all` lo hace. Sin este camino, subir PARSER_VERSION no
+      // repuebla nada y cada adjunto muere con un P2002 contra su propio
+      // `attachmentId` único.
+      const att = await seedDteAttachment({
+        tenant: tenantB,
+        accountId: accountB1,
+        folderName: 'compras_b1',
+        dte: ccfV3,
+        fileName: 'ccf-v3-reparseo.json',
+      });
+      expect(await ingest.ingestAttachment(tenantB.id, att)).toBe('PARSEADO');
+
+      // Estado que deja una corrida anterior: versión vieja y sin el campo nuevo.
+      // El override Q–T es del contador y tiene que sobrevivir al re-parseo.
+      await prisma.purchaseDocument.update({
+        where: { attachmentId: att },
+        data: {
+          parserVersion: PARSER_VERSION - 1,
+          receptorCodActividad: null,
+          receptorDescActividad: null,
+          anexoClasificacion: 2,
+        },
+      });
+      await prisma.dteParseResult.update({
+        where: { attachmentId: att },
+        data: { parserVersion: PARSER_VERSION - 1 },
+      });
+
+      expect(await ingest.ingestAttachment(tenantB.id, att)).toBe('PARSEADO');
+
+      const doc = await prisma.purchaseDocument.findUnique({
+        where: { attachmentId: att },
+        select: {
+          parserVersion: true,
+          receptorCodActividad: true,
+          receptorDescActividad: true,
+          anexoClasificacion: true,
+        },
+      });
+      expect(doc?.parserVersion).toBe(PARSER_VERSION);
+      expect(doc?.receptorCodActividad).toBe('56101');
+      expect(doc?.receptorDescActividad).toBe('Restaurantes');
+      expect(doc?.anexoClasificacion).toBe(2);
+
+      const ledger = await prisma.dteParseResult.findUnique({ where: { attachmentId: att } });
+      expect(ledger?.status).toBe('PARSEADO');
+      expect(ledger?.parserVersion).toBe(PARSER_VERSION);
     });
 
     it('el mismo DTE en dos tenants genera un documento por tenant', async () => {

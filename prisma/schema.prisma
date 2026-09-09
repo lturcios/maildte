@@ -305,6 +305,12 @@ model DteParty {
   tenant          Tenant  @relation(fields: [tenantId], references: [id])
   nit             String // sin guiones, tal cual el DTE (9 = DUI homologado, 14 = NIT)
   nrc             String?
+  /// Clave canónica del contribuyente (Addendum 11, §2): NRC normalizado, o el
+  /// NIT de 14 dígitos, o el DUI de 9. Se calcula en la ingesta con
+  /// `resolveCanonicalKey()` y por ahora SOLO se observa: la identidad sigue
+  /// siendo `@@unique([tenantId, nit])`. La unicidad se mueve acá en la fase 2,
+  /// después de mirar la data real de producción.
+  canonicalKey    String?
   nombre          String
   nombreComercial String?
   codActividad    String?
@@ -405,6 +411,11 @@ model PurchaseDocument {
   receptorNrc               String?
   receptorNombre            String
   receptorNombreComercial   String?
+  /// Actividad económica del receptor al momento de la emisión (Addendum 11,
+  /// §1.2). En `DteParty` el upsert la pisa con cada documento, así que sin este
+  /// snapshot una empresa con varias actividades no puede segmentar sus compras.
+  receptorCodActividad      String?
+  receptorDescActividad     String?
 
   // --- resumen normalizado (v3 ivaRete1/ivaPerci1/reteRenta = v4 ivaRete/ivaPerci) ---
   totalNoSuj          Decimal @db.Decimal(18, 8)

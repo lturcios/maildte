@@ -151,6 +151,34 @@ describe('DteIngestService', () => {
       expect(data.tenantId).toBe(TENANT_ID);
     });
 
+    it('persiste la actividad económica del receptor en el documento', async () => {
+      // Addendum 11, §1.2: el parser ya la extraía y se descartaba al armar el
+      // documento, así que la actividad solo vivía en la parte, donde el upsert
+      // la pisa con cada ingesta.
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      const data = (
+        prismaMock.purchaseDocument.create.mock.calls[0][0] as { data: Record<string, unknown> }
+      ).data;
+      expect(data.receptorCodActividad).toBe('46900');
+      expect(data.receptorDescActividad).toBe('Venta al por mayor de otros productos');
+      // La del emisor no se toca: sigue siendo la que ya se guardaba.
+      expect(data.emisorCodActividad).toBe('95110');
+    });
+
+    it('guarda la clave canónica de cada parte sin cambiar la identidad', async () => {
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      const calls = prismaMock.dteParty.upsert.mock.calls.map(
+        (call) => call[0] as { where: Record<string, unknown>; create: Record<string, unknown> },
+      );
+      // ccf-v4: emisor nrc 2717556, receptor nrc 54038.
+      expect(calls[0].create.canonicalKey).toBe('2717556');
+      expect(calls[1].create.canonicalKey).toBe('54038');
+      // La fase 1 no mueve la identidad: se sigue buscando por (tenantId, nit).
+      expect(calls[0].where).toEqual({ tenantId_nit: { tenantId: TENANT_ID, nit: '027561310' } });
+    });
+
     it('escribe todo dentro de una sola transacción con contexto de tenant', async () => {
       await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
@@ -231,6 +259,32 @@ describe('DteIngestService', () => {
       expect(updateData).not.toHaveProperty('classifiedById');
     });
 
+    it('re-parsea sin force actualizando el documento del adjunto, no creando otro', async () => {
+      // Es el camino de `mode=failed` al subir PARSER_VERSION: el backfill NO
+      // manda force (solo lo hace `all`). Si acá se fuera por `create`, chocaría
+      // contra el `attachmentId` único con un P2002 que no es un duplicado.
+      prismaMock.dteParseResult.findFirst.mockResolvedValue({
+        status: DteParseStatus.PARSEADO,
+        parserVersion: PARSER_VERSION - 1,
+      });
+      prismaMock.purchaseDocument.findFirst.mockResolvedValue({ id: 'doc-existente' });
+      prismaMock.purchaseDocument.update.mockResolvedValue({ id: 'doc-existente' });
+
+      const status = await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(status).toBe(DteParseStatus.PARSEADO);
+      expect(prismaMock.purchaseDocument.create).not.toHaveBeenCalled();
+      expect(prismaMock.purchaseDocument.update).toHaveBeenCalledTimes(1);
+      const updateData = (
+        prismaMock.purchaseDocument.update.mock.calls[0][0] as { data: Record<string, unknown> }
+      ).data;
+      expect(updateData.parserVersion).toBe(PARSER_VERSION);
+      expect(updateData.receptorCodActividad).toBe('46900');
+      // La clasificación manual Q–T del contador sobrevive al re-parseo.
+      expect(updateData).not.toHaveProperty('anexoClasificacion');
+      expect(updateData).not.toHaveProperty('classifiedById');
+    });
+
     it('registra DUPLICADO cuando el codigoGeneracion ya existe en el tenant', async () => {
       // Dentro de una transaccion con RLS, Postgres NO expone meta.target: Prisma
       // reporta "Unique constraint failed on the (not available)". Por eso el
@@ -241,10 +295,11 @@ describe('DteIngestService', () => {
           clientVersion: '5.22.0',
         }),
       );
-      prismaMock.purchaseDocument.findFirst.mockResolvedValue({
-        id: 'doc-canonico',
-        attachmentId: 'otro-adjunto',
-      });
+      // Primer findFirst: existencia del documento de ESTE adjunto (no hay).
+      // Segundo: el canónico por codigoGeneracion, que vino de otro adjunto.
+      prismaMock.purchaseDocument.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue({ id: 'doc-canonico', attachmentId: 'otro-adjunto' });
 
       const status = await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
@@ -275,10 +330,13 @@ describe('DteIngestService', () => {
           clientVersion: '5.22.0',
         }),
       );
-      prismaMock.purchaseDocument.findFirst.mockResolvedValue({
-        id: 'doc-1',
-        attachmentId: ATTACHMENT_ID,
-      });
+      // La existencia por adjunto da null (si diera el documento se iría por
+      // update y no habría create que fallara), pero el canónico por
+      // codigoGeneracion resulta ser el de este mismo adjunto: la restricción
+      // violada fue otra y no hay que enmascararla como duplicado.
+      prismaMock.purchaseDocument.findFirst
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue({ id: 'doc-1', attachmentId: ATTACHMENT_ID });
 
       await expect(service.ingestAttachment(TENANT_ID, ATTACHMENT_ID)).rejects.toThrow();
     });

@@ -43,6 +43,9 @@ export const DOCUMENT_LIST_SELECT = {
   emisorNombre: true,
   receptorNit: true,
   receptorNombre: true,
+  // Addendum 11, fase 1: el dato viaja para que se pueda ver. El filtro por
+  // actividad y su selector son fase 3.
+  receptorCodActividad: true,
   totalExenta: true,
   totalNoSuj: true,
   totalGravada: true,
@@ -113,6 +116,8 @@ export const DOCUMENT_DETAIL_SELECT = {
   receptorNrc: true,
   receptorNombre: true,
   receptorNombreComercial: true,
+  receptorCodActividad: true,
+  receptorDescActividad: true,
   totalNoSuj: true,
   totalExenta: true,
   totalGravada: true,

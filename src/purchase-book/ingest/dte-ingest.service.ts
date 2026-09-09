@@ -7,6 +7,7 @@ import { isPrismaUniqueViolation } from '../../prisma/prisma-errors';
 import { StorageService } from '../../storage/storage.service';
 import { AppConfigService } from '../../config/app-config.service';
 import { parseDte, PARSER_VERSION } from '../parser/dte-parser';
+import { resolveCanonicalKey } from '../identity/canonical-key';
 import { ParsedCcf, ParseOutcome } from '../parser/dte-parser.types';
 
 /** Estados terminales: no se re-parsea salvo que el job pida `force`. */
@@ -120,7 +121,7 @@ export class DteIngestService {
       return this.recordParseOutcome(tenantId, attachmentId, outcome);
     }
 
-    return this.persist(tenantId, attachmentId, attachment, outcome.dte, raw, force);
+    return this.persist(tenantId, attachmentId, attachment, outcome.dte, raw);
   }
 
   // -------------------------------------------------------------------------
@@ -230,7 +231,6 @@ export class DteIngestService {
     attachment: AttachmentRow,
     dte: ParsedCcf,
     raw: unknown,
-    force: boolean,
   ): Promise<DteParseStatus> {
     const { identificacion, emisor, emisorExtras, receptor, resumen, passthrough } = dte;
 
@@ -268,6 +268,11 @@ export class DteIngestService {
           receptorNrc: receptor.nrc,
           receptorNombre: receptor.nombre,
           receptorNombreComercial: receptor.nombreComercial,
+          // La actividad del receptor en `DteParty` la pisa el upsert de cada
+          // documento: sin este snapshot el histórico por actividad no existe
+          // (Addendum 11, §1.2).
+          receptorCodActividad: receptor.codActividad,
+          receptorDescActividad: receptor.descActividad,
           ...resumen,
           selloRecibido: passthrough.selloRecibido,
           documentoRelacionado: this.toJson(passthrough.documentoRelacionado),
@@ -279,12 +284,22 @@ export class DteIngestService {
           parserVersion: PARSER_VERSION,
         };
 
-        const existing = force
-          ? await tx.purchaseDocument.findFirst({
-              where: { attachmentId, tenantId },
-              select: { id: true },
-            })
-          : null;
+        // Que el documento exista NO depende de `force`: depende de si este
+        // adjunto ya produjo uno. `force` gobierna el early-exit de
+        // `hasTerminalResult`, no cómo se escribe.
+        //
+        // Buscarlo solo con `force` rompía el reprocesamiento por versión de
+        // parser: `mode=failed` encola los adjuntos con `parserVersion` anterior
+        // SIN force (`scripts/backfill-purchase-book.ts` solo fuerza en `all`),
+        // así que un documento ya PARSEADO se iba por `create` contra un
+        // `attachmentId` único y moría con P2002 — que además no es un
+        // duplicado entre buzones, así que `findCanonical` devolvía null y el
+        // error se propagaba. El adjunto se reintentaba 3 veces y quedaba con la
+        // versión vieja. Verificado en el e2e, que cubre justamente ese camino.
+        const existing = await tx.purchaseDocument.findFirst({
+          where: { attachmentId, tenantId },
+          select: { id: true },
+        });
 
         let documentId: string;
         if (existing) {
@@ -386,6 +401,11 @@ export class DteIngestService {
       complemento: party.complemento,
       telefono: party.telefono,
       correo: party.correo,
+      // Addendum 11, fase 1: se calcula y se guarda, pero NO identifica todavía.
+      // La unicidad sigue siendo `@@unique([tenantId, nit])`; el `where` de acá
+      // abajo no cambió. Se escribe para poder mirar la data real de producción
+      // antes de mover la identidad en la fase 2.
+      canonicalKey: resolveCanonicalKey(party),
     };
     // Los flags se acumulan con OR: una parte puede ser emisor en un documento y
     // receptor en otro, y ninguno de los dos roles se pierde al actualizar.

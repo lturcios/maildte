@@ -43,10 +43,24 @@ import {
  * normalizan, y los campos de retención/percepción ausentes valen cero en vez
  * de ser error, porque la mayoría de los emisores no los envían.
  *
- * Al cambiar la semántica de normalización hay que subir PARSER_VERSION y
- * correr el backfill en modo `failed` para re-parsear lo viejo.
+ * PARSER_VERSION sube en DOS casos, y el segundo es el que se pasa por alto:
+ *
+ * 1. Cambia la semántica de normalización de este archivo.
+ * 2. Cambia QUÉ SE PERSISTE de lo que el parser ya devolvía — un campo que se
+ *    extraía y se descartaba y ahora se guarda. El parser queda intacto, así
+ *    que leyendo solo este archivo el bump parece innecesario; no lo es. La
+ *    versión no describe al parser: marca con qué contrato se leyó cada
+ *    documento, y ese contrato incluye las columnas que se llenaron.
+ *
+ * En los dos casos hay que correr después el backfill en modo `failed`
+ * (RUNBOOK §9) para re-leer lo viejo con la versión nueva.
+ *
+ * Historial:
+ * - 1: Addendum 10. Versión inicial.
+ * - 2: Addendum 11, fase 1. El parser no cambió; se empezaron a persistir
+ *      `receptorCodActividad`, `receptorDescActividad` y `DteParty.canonicalKey`.
  */
-export const PARSER_VERSION = 1;
+export const PARSER_VERSION = 2;
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
