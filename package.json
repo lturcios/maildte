@@ -29,7 +29,8 @@
     "prisma:migrate": "prisma migrate dev",
     "seed:superadmin": "ts-node scripts/seed-superadmin.ts",
     "seed:mail-providers": "ts-node scripts/seed-mail-providers.ts",
-    "migrate:to-multitenant": "ts-node scripts/migrate-to-multitenant.ts"
+    "migrate:to-multitenant": "ts-node scripts/migrate-to-multitenant.ts",
+    "backfill:purchase-book": "ts-node scripts/backfill-purchase-book.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
@@ -53,7 +54,8 @@
     "pino-http": "^10.3.0",
     "prisma": "^5.22.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "write-excel-file": "4.1.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",
@@ -90,6 +92,10 @@
       "ts"
     ],
     "rootDir": "src",
+    "roots": [
+      "<rootDir>",
+      "<rootDir>/../scripts"
+    ],
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"

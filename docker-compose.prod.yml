@@ -57,7 +57,10 @@ services:
     environment:
       POSTGRES_DB: maildte
       POSTGRES_USER: maildte
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # Mismo criterio que redis: variable obligatoria con ${VAR:?mensaje}. Con
+      # ${DB_PASSWORD} pelado, una variable ausente se sustituye por cadena
+      # vacía y el fallo aparece recién dentro del contenedor.
+      POSTGRES_PASSWORD: '${DB_PASSWORD:?DB_PASSWORD es obligatoria. Definirla en el .env junto a este compose y usar la misma clave en DATABASE_URL.}'
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -73,10 +76,38 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Autenticación obligatoria. La sintaxis ${VAR:?mensaje} de Compose aborta
+    # el `up` cuando REDIS_PASSWORD no está definida o está vacía: con un
+    # ${REDIS_PASSWORD} pelado, Compose sustituiría por cadena vacía y Redis
+    # arrancaría sin contraseña con aspecto de estar configurado. La misma clave
+    # tiene que ir en REDIS_URL (redis://:CLAVE@redis:6379); la aplicación no
+    # lee REDIS_PASSWORD, solo REDIS_URL.
+    command:
+      - 'redis-server'
+      - '--requirepass'
+      - '${REDIS_PASSWORD:?REDIS_PASSWORD es obligatoria. Definirla en el .env junto a este compose y usar la misma clave en REDIS_URL (redis://:CLAVE@redis:6379).}'
+    environment:
+      # redis-cli toma REDISCLI_AUTH del entorno. La usa el healthcheck de abajo
+      # para no llevar la clave en su propia línea de comandos, que se ejecuta
+      # cada 5 s y haría que redis-cli imprima el aviso de `-a`/`-u` en el log
+      # de salud. También la aprovechan los `docker compose exec redis
+      # redis-cli ...` del RUNBOOK, que así no piden credenciales a mano.
+      REDISCLI_AUTH: '${REDIS_PASSWORD:?REDIS_PASSWORD es obligatoria. Definirla en el .env junto a este compose y usar la misma clave en REDIS_URL (redis://:CLAVE@redis:6379).}'
     volumes:
       - redisdata:/data
+    ports:
+      # Solo loopback, mismo criterio que postgres (ambos exigen contraseña y
+      # ninguno sale del host): los scripts de mantenimiento corren en el host
+      # (la imagen no trae ts-node) y el backfill del libro de compras necesita
+      # encolar en esta cola. 6380 y no 6379 por si el VPS ya tiene un Redis
+      # nativo escuchando. Nunca expuesto a internet.
+      - '127.0.0.1:6380:6379'
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      # Con requirepass, un `redis-cli ping` sin credenciales responde NOAUTH.
+      # Se exige el PONG literal en vez de confiar en el código de salida:
+      # redis-cli puede terminar en 0 imprimiendo el error, y un healthcheck
+      # que se conforma con eso daría por sano un Redis que rechaza a todos.
+      test: ['CMD-SHELL', 'redis-cli ping | grep -q PONG']
       interval: 5s
       timeout: 5s
       retries: 10

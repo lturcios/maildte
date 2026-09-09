@@ -8,9 +8,11 @@ import { Toaster } from '@/components/ui/sonner';
 import { CorreosPage } from '@/pages/CorreosPage';
 import { CuentasPage } from '@/pages/CuentasPage';
 import { DashboardPage } from '@/pages/DashboardPage';
+import { LibroComprasPage } from '@/pages/LibroComprasPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { OrganizacionesPage } from '@/pages/OrganizacionesPage';
+import { ReceptoresPage } from '@/pages/ReceptoresPage';
 import { ServiciosCorreoPage } from '@/pages/ServiciosCorreoPage';
 
 // react-router no matchea rutas si el basename trae "/" final; BASE_URL de
@@ -30,6 +32,8 @@ function App() {
               <Route path="cuentas" element={<CuentasPage />} />
               <Route path="correos" element={<CorreosPage />} />
               <Route path="logs" element={<LogsPage />} />
+              <Route path="libro-compras" element={<LibroComprasPage />} />
+              <Route path="libro-compras/receptores" element={<ReceptoresPage />} />
             </Route>
             <Route element={<SuperadminRoute />}>
               <Route path="organizaciones" element={<OrganizacionesPage />} />

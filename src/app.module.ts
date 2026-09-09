@@ -12,6 +12,7 @@ import { SyncBootstrapModule } from './sync/sync-bootstrap.module';
 import { EmailsModule } from './emails/emails.module';
 import { StatsModule } from './stats/stats.module';
 import { ExportModule } from './export/export.module';
+import { PurchaseBookModule } from './purchase-book/purchase-book.module';
 import { UsersModule } from './users/users.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AdminModule } from './admin/admin.module';
@@ -28,6 +29,7 @@ import { MailProvidersModule } from './mail-providers/mail-providers.module';
     EmailsModule,
     StatsModule,
     ExportModule,
+    PurchaseBookModule,
     UsersModule,
     ApiKeysModule,
     AdminModule,

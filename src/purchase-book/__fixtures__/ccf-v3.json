@@ -1,0 +1,124 @@
+{
+  "identificacion": {
+    "version": 3,
+    "ambiente": "00",
+    "tipoDte": "03",
+    "numeroControl": "DTE-03-M001P001-000000000000077",
+    "codigoGeneracion": "FC5B1AE1-07F1-42CA-A7DA-AB4F8A3381D2",
+    "tipoModelo": 1,
+    "tipoOperacion": 1,
+    "tipoContingencia": null,
+    "motivoContin": null,
+    "fecEmi": "2026-03-19",
+    "horEmi": "01:32:25",
+    "tipoMoneda": "USD"
+  },
+  "documentoRelacionado": null,
+  "emisor": {
+    "nit": "040522092",
+    "nrc": "2435510",
+    "nombre": "Manuel Eduardo Umanzor Jiménez",
+    "codActividad": "95120",
+    "descActividad": "Reparación de equipo de comunicación",
+    "nombreComercial": "Casa Matriz",
+    "tipoEstablecimiento": "02",
+    "codEstableMH": "M001",
+    "codEstable": "M001",
+    "codPuntoVentaMH": "P001",
+    "codPuntoVenta": "P001",
+    "direccion": {
+      "departamento": "12",
+      "municipio": "22",
+      "complemento": "Gasolinera Texaco Centro, contiguo a Restaurante Puerta del Sol"
+    },
+    "telefono": "79282246",
+    "correo": "facturacion@tuempresa.com"
+  },
+  "receptor": {
+    "nombre": "DILMA EUNICE RIVERA BONILLA",
+    "direccion": {
+      "departamento": "12",
+      "municipio": "22",
+      "complemento": "CARRETERA PANAMERICANA KM 142, SAN MIGUEL"
+    },
+    "telefono": "60074974",
+    "correo": "l.turcios.08@gmail.com",
+    "codActividad": "56101",
+    "descActividad": "Restaurantes",
+    "nit": "12171609731022",
+    "nrc": "1382619",
+    "nombreComercial": "SUBWAY RUTA MILITAR"
+  },
+  "otrosDocumentos": null,
+  "ventaTercero": null,
+  "cuerpoDocumento": [
+    {
+      "numItem": 1,
+      "tipoItem": 1,
+      "numeroDocumento": null,
+      "cantidad": 1,
+      "codigo": "3540",
+      "codTributo": null,
+      "uniMedida": 59,
+      "descripcion": "Pantalla",
+      "precioUni": 176.99115044,
+      "montoDescu": 0,
+      "ventaNoSuj": 0,
+      "ventaExenta": 0,
+      "ventaGravada": 176.99,
+      "tributos": [
+        "20"
+      ],
+      "psv": 0,
+      "noGravado": 0
+    }
+  ],
+  "resumen": {
+    "totalNoSuj": 0,
+    "totalExenta": 0,
+    "totalGravada": 176.99,
+    "subTotalVentas": 176.99,
+    "descuNoSuj": 0,
+    "descuExenta": 0,
+    "descuGravada": 0,
+    "porcentajeDescuento": 0,
+    "totalDescu": 0,
+    "tributos": [
+      {
+        "codigo": "20",
+        "descripcion": "Impuesto al Valor Agregado 13%",
+        "valor": 23.01
+      }
+    ],
+    "subTotal": 176.99,
+    "ivaRete1": 1.77,
+    "reteRenta": 0,
+    "montoTotalOperacion": 200,
+    "totalNoGravado": 0,
+    "totalPagar": 198.23,
+    "totalLetras": "CIENTO NOVENTA Y OCHO 23/100 DÓLARES",
+    "saldoFavor": 0,
+    "condicionOperacion": 1,
+    "pagos": [
+      {
+        "codigo": "01",
+        "montoPago": 198.23,
+        "referencia": null,
+        "plazo": null,
+        "periodo": null
+      }
+    ],
+    "numPagoElectronico": null,
+    "ivaPerci1": 0
+  },
+  "extension": {
+    "nombEntrega": null,
+    "docuEntrega": null,
+    "nombRecibe": null,
+    "docuRecibe": null,
+    "observaciones": null,
+    "placaVehiculo": null
+  },
+  "apendice": null,
+  "selloRecibido": "2026492CA62A9A6F4AD1A07C2FFA474861A2YD61"
+}

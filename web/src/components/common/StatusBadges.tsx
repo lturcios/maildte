@@ -1,6 +1,12 @@
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import type { AccountStatus, AdminTenantStatus, EmailStatus, SyncStatus } from '@/types/domain';
+import type {
+  AccountStatus,
+  AdminTenantStatus,
+  DteParseStatus,
+  EmailStatus,
+  SyncStatus,
+} from '@/types/domain';
 
 /**
  * Insignias de estado por dominio. Reusan exclusivamente las variables de
@@ -149,6 +155,111 @@ export function EmailStatusBadge({ status }: { status: EmailStatus }) {
   return (
     <Badge variant="outline" className={cn(BADGE_BASE, 'text-muted-foreground')}>
       {label}
+    </Badge>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Libro de compras (Addendum 10)
+// ---------------------------------------------------------------------------
+
+const PARSE_STATUS_LABEL: Record<DteParseStatus, string> = {
+  PARSEADO: 'Parseado',
+  DUPLICADO: 'Duplicado',
+  IGNORADO_TIPO: 'Otro tipo de DTE',
+  VERSION_NO_SOPORTADA: 'Versión no soportada',
+  NO_ES_DTE: 'No es un DTE',
+  JSON_INVALIDO: 'JSON inválido',
+  ARCHIVO_DEMASIADO_GRANDE: 'Archivo muy grande',
+  ARCHIVO_FALTANTE: 'Archivo faltante',
+  ERROR: 'Error',
+};
+
+/** Estados que no son fallas: el documento se procesó como correspondía. */
+const PARSE_STATUS_OK: DteParseStatus[] = ['PARSEADO'];
+const PARSE_STATUS_NEUTRAL: DteParseStatus[] = ['DUPLICADO', 'IGNORADO_TIPO'];
+
+export function ParseStatusBadge({
+  status,
+  errorDetail,
+}: {
+  status: DteParseStatus;
+  errorDetail?: string | null;
+}) {
+  const label = PARSE_STATUS_LABEL[status];
+
+  if (PARSE_STATUS_OK.includes(status)) {
+    return (
+      <Badge
+        variant="outline"
+        className={cn(BADGE_BASE, 'border-chart-4/40 bg-chart-4/15 text-chart-4')}
+      >
+        {label}
+      </Badge>
+    );
+  }
+
+  if (PARSE_STATUS_NEUTRAL.includes(status)) {
+    return (
+      <Badge variant="outline" className={cn(BADGE_BASE, 'text-muted-foreground')}>
+        {label}
+      </Badge>
+    );
+  }
+
+  return (
+    <Badge
+      variant="outline"
+      title={errorDetail ?? undefined}
+      className={cn(BADGE_BASE, 'border-destructive/40 bg-destructive/15 text-destructive')}
+    >
+      {label}
+    </Badge>
+  );
+}
+
+/**
+ * Estado de clasificación de las columnas Q–T de una compra.
+ *
+ * Muestra los cuatro códigos efectivos cuando están resueltos, y una insignia
+ * destructiva cuando falta alguno: el contador necesita ver de un vistazo qué
+ * filas bloquean el envío del anexo.
+ */
+export function ClassificationBadge({
+  codes,
+  preEpoch = false,
+}: {
+  /** Los cuatro códigos efectivos, en orden Q, R, S, T. `null` = sin resolver. */
+  codes: (number | null)[];
+  /** Período anterior a febrero 2024: el anexo pide "0" y no hay nada que clasificar. */
+  preEpoch?: boolean;
+}) {
+  if (preEpoch) {
+    return (
+      <Badge variant="outline" className={cn(BADGE_BASE, 'text-muted-foreground')}>
+        No aplica
+      </Badge>
+    );
+  }
+
+  if (codes.some((code) => code === null)) {
+    return (
+      <Badge
+        variant="outline"
+        className={cn(BADGE_BASE, 'border-destructive/40 bg-destructive/15 text-destructive')}
+      >
+        Sin clasificar
+      </Badge>
+    );
+  }
+
+  return (
+    <Badge
+      variant="outline"
+      title="Tipo de operación · Clasificación · Sector · Tipo de costo/gasto"
+      className={cn(BADGE_BASE, 'border-chart-4/40 bg-chart-4/15 font-mono text-chart-4')}
+    >
+      {codes.join(' · ')}
     </Badge>
   );
 }

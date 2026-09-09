@@ -47,6 +47,19 @@ enum DomainMatchKind {
   MX_SUFFIX // sufijo del registro MX: google.com
 }
 
+// Resultado del parseo de un adjunto JSON de DTE (Addendum 10, ADR-10.1).
+enum DteParseStatus {
+  PARSEADO
+  DUPLICADO // mismo [tenantId, codigoGeneracion] ya ingresado desde otro adjunto
+  IGNORADO_TIPO // DTE válido con tipoDte != "03"
+  VERSION_NO_SOPORTADA // identificacion.version fuera de {3, 4}
+  NO_ES_DTE // JSON válido que no es un sobre DTE
+  JSON_INVALIDO
+  ARCHIVO_DEMASIADO_GRANDE
+  ARCHIVO_FALTANTE
+  ERROR // campos faltantes o inválidos; errorDetail los enumera
+}
+
 model Tenant {
   id              String       @id @default(uuid())
   name            String
@@ -63,6 +76,11 @@ model Tenant {
   emails      ProcessedEmail[]
   attachments Attachment[]
   syncLogs    SyncLog[]
+
+  // Addendum 10 — Libro de compras
+  dteParties        DteParty[]
+  dteParseResults   DteParseResult[]
+  purchaseDocuments PurchaseDocument[]
 
   @@map("tenants")
 }
@@ -237,6 +255,10 @@ model Attachment {
   sha256       String
   createdAt    DateTime       @default(now())
 
+  // Addendum 10 — Libro de compras. Solo aplican a fileType = JSON.
+  parseResult      DteParseResult?
+  purchaseDocument PurchaseDocument?
+
   @@index([emailId])
   @@index([sha256])
   @@index([tenantId, createdAt, id])
@@ -262,4 +284,248 @@ model SyncLog {
   @@index([accountId, startedAt])
   @@index([tenantId, startedAt])
   @@map("sync_logs")
+}
+
+// =============================================================
+// Addendum 10 — Libro de compras
+//
+// Parseo de adjuntos JSON de DTE tipoDte "03" (Comprobante de Crédito Fiscal),
+// esquemas de Hacienda v3 y v4, hacia tablas normalizadas que alimentan el
+// Anexo 3 "Detalle de Compras".
+//
+// Las 6 tablas llevan tenantId y RLS FORCE + policy tenant_isolation, escritas
+// a mano en la migración (Prisma no las genera).
+// =============================================================
+
+/// Catálogo por tenant de emisores/receptores vistos en DTE (ADR-10.2).
+/// Alimenta los selects de filtro y guarda los defaults Q-T del receptor.
+model DteParty {
+  id              String  @id @default(uuid())
+  tenantId        String
+  tenant          Tenant  @relation(fields: [tenantId], references: [id])
+  nit             String // sin guiones, tal cual el DTE (9 = DUI homologado, 14 = NIT)
+  nrc             String?
+  nombre          String
+  nombreComercial String?
+  codActividad    String?
+  descActividad   String?
+  departamento    String?
+  municipio       String?
+  distrito        String?
+  complemento     String?
+  telefono        String?
+  correo          String?
+  seenAsEmisor    Boolean @default(false)
+  seenAsReceptor  Boolean @default(false)
+
+  /// Defaults del Anexo 3 (columnas Q, R, S, T). Solo tienen sentido cuando la
+  /// parte actúa como receptor. Precedencia: override del documento > este default.
+  defaultTipoOperacion  Int?
+  defaultClasificacion  Int?
+  defaultSector         Int?
+  defaultTipoCostoGasto Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  emisorDocuments   PurchaseDocument[] @relation("DocEmisor")
+  receptorDocuments PurchaseDocument[] @relation("DocReceptor")
+
+  @@unique([tenantId, nit])
+  @@index([tenantId, seenAsEmisor])
+  @@index([tenantId, seenAsReceptor])
+  @@map("dte_parties")
+}
+
+/// Ledger de parseo: exactamente una fila por adjunto JSON procesado (ADR-10.1).
+/// Los no-03 quedan como IGNORADO_TIPO; los duplicados apuntan al documento canónico.
+model DteParseResult {
+  id               String            @id @default(uuid())
+  tenantId         String
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  attachmentId     String            @unique
+  attachment       Attachment        @relation(fields: [attachmentId], references: [id])
+  status           DteParseStatus
+  tipoDte          String?
+  version          Int?
+  codigoGeneracion String?
+  documentId       String? // PARSEADO y DUPLICADO apuntan al documento canónico
+  document         PurchaseDocument? @relation(fields: [documentId], references: [id])
+  errorDetail      String?
+  /// Versión del parser que produjo esta fila. Permite re-parsear selectivamente
+  /// cuando cambia la normalización (mode=failed del backfill).
+  parserVersion    Int
+  parsedAt         DateTime          @default(now())
+
+  @@index([tenantId, status])
+  @@index([documentId])
+  @@map("dte_parse_results")
+}
+
+/// Comprobante de Crédito Fiscal parseado. Solo documentos válidos tipoDte "03".
+model PurchaseDocument {
+  id           String     @id @default(uuid())
+  tenantId     String
+  tenant       Tenant     @relation(fields: [tenantId], references: [id])
+  attachmentId String     @unique // archivo fuente canónico
+  attachment   Attachment @relation(fields: [attachmentId], references: [id])
+  emailId      String
+  accountId    String // desnormalizado para el filtro por cuenta
+
+  // --- identificacion ---
+  version          Int
+  ambiente         String
+  tipoDte          String
+  numeroControl    String
+  codigoGeneracion String // con guiones, tal cual se emitió; el export los quita
+  tipoModelo       Int
+  tipoOperacion    Int
+  tipoContingencia Int?
+  motivoContin     String?
+  /// Fecha calendario sin zona (Hacienda emite YYYY-MM-DD). DATE no tiene zona,
+  /// así que respeta la regla 7 de CLAUDE.md sin conversión.
+  fecEmi           DateTime @db.Date
+  horEmi           String
+  tipoMoneda       String
+
+  // --- partes: FK al catálogo + snapshot al momento de la emisión (ADR-10.2) ---
+  emisorId                  String
+  emisor                    DteParty @relation("DocEmisor", fields: [emisorId], references: [id])
+  emisorNit                 String
+  emisorNrc                 String?
+  emisorNombre              String
+  emisorNombreComercial     String?
+  emisorCodActividad        String?
+  emisorTipoEstablecimiento String? // solo v3
+  emisorCodEstable          String?
+  emisorCodPuntoVenta       String?
+  receptorId                String
+  receptor                  DteParty @relation("DocReceptor", fields: [receptorId], references: [id])
+  receptorNit               String
+  receptorNrc               String?
+  receptorNombre            String
+  receptorNombreComercial   String?
+
+  // --- resumen normalizado (v3 ivaRete1/ivaPerci1/reteRenta = v4 ivaRete/ivaPerci) ---
+  totalNoSuj          Decimal @db.Decimal(18, 8)
+  totalExenta         Decimal @db.Decimal(18, 8)
+  totalGravada        Decimal @db.Decimal(18, 8)
+  subTotalVentas      Decimal @db.Decimal(18, 8)
+  descuNoSuj          Decimal @db.Decimal(18, 8)
+  descuExenta         Decimal @db.Decimal(18, 8)
+  descuGravada        Decimal @db.Decimal(18, 8)
+  porcentajeDescuento Decimal @db.Decimal(18, 8)
+  totalDescu          Decimal @db.Decimal(18, 8)
+  subTotal            Decimal @db.Decimal(18, 8)
+  ivaRetenido         Decimal @default(0) @db.Decimal(18, 8)
+  ivaPercibido        Decimal @default(0) @db.Decimal(18, 8)
+  retencionRenta      Decimal @default(0) @db.Decimal(18, 8)
+  /// resumen.tributos[codigo = "20"].valor - columna N del Anexo 3.
+  ivaCreditoFiscal    Decimal @default(0) @db.Decimal(18, 8)
+  montoTotalOperacion Decimal @db.Decimal(18, 8)
+  totalNoGravado      Decimal @db.Decimal(18, 8)
+  totalPagar          Decimal @db.Decimal(18, 8)
+  saldoFavor          Decimal @db.Decimal(18, 8)
+  totalLetras         String
+  condicionOperacion  Int
+  numPagoElectronico  String?
+  observaciones       String?
+
+  // --- secciones sin normalizar + copia íntegra (ADR-10.8) ---
+  selloRecibido        String?
+  documentoRelacionado Json?
+  otrosDocumentos      Json?
+  ventaTercero         Json?
+  extension            Json?
+  apendice             Json?
+  rawJson              Json
+
+  // --- overrides del Anexo 3 (Q, R, S, T): null = usar default del receptor ---
+  anexoTipoOperacion  Int?
+  anexoClasificacion  Int?
+  anexoSector         Int?
+  anexoTipoCostoGasto Int?
+  anexoNota           String?
+  classifiedById      String?
+  classifiedAt        DateTime?
+
+  parserVersion Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items        PurchaseDocumentItem[]
+  taxes        PurchaseDocumentTax[]
+  payments     PurchaseDocumentPayment[]
+  parseResults DteParseResult[]
+
+  // Idempotencia del libro entre buzones del mismo tenant. No se elimina ni se
+  // relaja: es el equivalente de @@unique([accountId, messageId]) para el DTE.
+  @@unique([tenantId, codigoGeneracion])
+  @@index([tenantId, fecEmi])
+  @@index([tenantId, receptorId, fecEmi])
+  @@index([tenantId, emisorId, fecEmi])
+  @@index([tenantId, accountId, fecEmi])
+  @@index([tenantId, numeroControl])
+  @@map("purchase_documents")
+}
+
+/// cuerpoDocumento[]
+model PurchaseDocumentItem {
+  id              String           @id @default(uuid())
+  tenantId        String
+  documentId      String
+  document        PurchaseDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  numItem         Int
+  tipoItem        Int
+  numeroDocumento String?
+  cantidad        Decimal          @db.Decimal(18, 8)
+  codigo          String?
+  codTributo      String?
+  uniMedida       Int
+  descripcion     String
+  precioUni       Decimal          @db.Decimal(18, 8)
+  montoDescu      Decimal          @db.Decimal(18, 8)
+  ventaNoSuj      Decimal          @db.Decimal(18, 8)
+  ventaExenta     Decimal          @db.Decimal(18, 8)
+  ventaGravada    Decimal          @db.Decimal(18, 8)
+  tributos        String[] // ["20"] o []
+  psv             Decimal          @db.Decimal(18, 8)
+  noGravado       Decimal          @db.Decimal(18, 8)
+
+  @@unique([documentId, numItem])
+  @@index([tenantId])
+  @@map("purchase_document_items")
+}
+
+/// resumen.tributos[]
+model PurchaseDocumentTax {
+  id          String           @id @default(uuid())
+  tenantId    String
+  documentId  String
+  document    PurchaseDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  codigo      String
+  descripcion String
+  valor       Decimal          @db.Decimal(18, 8)
+
+  @@unique([documentId, codigo])
+  @@index([tenantId])
+  @@map("purchase_document_taxes")
+}
+
+/// resumen.pagos[]
+model PurchaseDocumentPayment {
+  id         String           @id @default(uuid())
+  tenantId   String
+  documentId String
+  document   PurchaseDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  position   Int
+  codigo     String
+  montoPago  Decimal          @db.Decimal(18, 8)
+  referencia String?
+  plazo      String?
+  periodo    Int?
+
+  @@unique([documentId, position])
+  @@index([tenantId])
+  @@map("purchase_document_payments")
 }

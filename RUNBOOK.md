@@ -22,7 +22,8 @@ tenés un token de acceso (`TOKEN`) obtenido con `POST /auth/login` (sección 3)
    DB_PASSWORD=<contraseña de Postgres>
    DATABASE_URL=postgresql://maildte:<DB_PASSWORD>@postgres:5432/maildte
    APP_DATABASE_URL=postgresql://maildte_app:<otra-contraseña>@postgres:5432/maildte
-   REDIS_URL=redis://redis:6379
+   REDIS_PASSWORD=<contraseña de Redis>
+   REDIS_URL=redis://:<REDIS_PASSWORD>@redis:6379
    ENCRYPTION_KEY=<openssl rand -hex 32>
    JWT_SECRET=<openssl rand -hex 32>
    JWT_REFRESH_SECRET=<openssl rand -hex 32>
@@ -32,7 +33,26 @@ tenés un token de acceso (`TOKEN`) obtenido con `POST /auth/login` (sección 3)
    LOG_LEVEL=info
    MAX_ATTACHMENT_MB=25
    EXPORT_MAX_ZIP_FILES=5000
+   PURCHASE_BOOK_EXPORT_MAX_ROWS=20000
+   PURCHASE_BOOK_REPROCESS_BATCH=1000
+   DTE_MAX_JSON_BYTES=2097152
+   DTE_QUEUE_CONCURRENCY=4
    ```
+
+   Las cuatro últimas son del libro de compras (Addendum 10) y tienen valores
+   por defecto razonables: se pueden omitir del `.env` salvo que haya que
+   ajustarlas. Ver la sección 9.
+
+   `REDIS_PASSWORD` y `REDIS_URL` son **un solo dato en dos lugares** y se
+   escriben juntas: el compose arranca Redis con
+   `--requirepass ${REDIS_PASSWORD}` y la aplicación se conecta únicamente por
+   `REDIS_URL`, que tiene que llevar esa misma clave embebida
+   (`redis://:CLAVE@redis:6379`; los dos puntos delante de la clave dejan la
+   parte de usuario vacía, porque `--requirepass` fija la contraseña del
+   usuario `default` y no hay otro que declarar). Generala con
+   `openssl rand -hex 32`, igual que las otras. Si `REDIS_PASSWORD` falta o queda vacía, `docker compose up`
+   **aborta** con un mensaje explícito en vez de levantar un Redis sin
+   contraseña: es intencional, no un error de configuración del compose.
 
    `APP_DATABASE_URL` apunta al rol restringido `maildte_app` — ese rol lo crea
    automáticamente la migración `multi_tenancy` la primera vez que corre
@@ -292,6 +312,435 @@ Las tablas del catálogo y la columna `providerId` quedan en la base sin uso: el
 código viejo no las mira. **Pero si se corrió `--link-existing`**, las cuentas
 vinculadas tienen sus columnas `imapHost/imapPort/imapSecure` intactas (nunca se
 borran), así que el código viejo las lee y sigue funcionando. No hay pérdida.
+
+---
+
+## 2.c Despliegue del libro de compras (Addendum 10)
+
+Estos son **todos** los pasos para llevar el Addendum 10 a un VPS que ya está
+corriendo. Se ejecutan una sola vez, en este orden. El paso 6 (backfill inicial)
+no es opcional: sin él el libro de compras queda vacío para todos los clientes.
+
+**Qué trae**: lectura automática de los adjuntos JSON de DTE, el libro de
+compras consultable por tenant y la exportación del Anexo 3 en CSV y XLSX. Suma
+una segunda cola de BullMQ (`dte`) que consume el worker, en paralelo a `sync`.
+
+**Ventana de servicio**: no hace falta. La migración
+`20260908035947_purchase_book` es **aditiva**: crea el enum `DteParseStatus`,
+seis tablas nuevas (`dte_parties`, `dte_parse_results`, `purchase_documents`,
+`purchase_document_items`, `purchase_document_taxes`,
+`purchase_document_payments`), sus `GRANT` al rol `maildte_app` y una policy
+`tenant_isolation` con `FORCE ROW LEVEL SECURITY` en cada una. No reescribe
+ninguna fila existente ni toca ninguna tabla anterior, así que la sincronización
+de correo sigue corriendo durante todo el despliegue.
+
+### 1. Traer el código y reconstruir
+
+```bash
+cd /opt/maildte
+git pull
+docker compose -f docker-compose.prod.yml build
+```
+
+Este despliegue **agrega un puerto publicado** a `redis` en
+`docker-compose.prod.yml` (`127.0.0.1:6380:6379`, solo loopback): el backfill
+del paso 6 corre en el host y necesita encolar en la cola `dte`. Si el VPS ya
+tiene algo escuchando en 6380, cambiá el puerto del lado izquierdo y usá el
+mismo en el `REDIS_URL` del paso 6.
+
+### 1.b Poner contraseña a Redis — un solo paso, las dos variables juntas
+
+Hasta este despliegue, Redis corría **sin autenticación**. Al publicarle un
+puerto, aunque sea solo en loopback, cualquier proceso del VPS podía hablarle:
+leer y borrar la cola, y leer los locks de sincronización. A partir de acá el
+compose lo arranca con `--requirepass` y queda con el mismo criterio que
+postgres (contraseña obligatoria, publicado solo en loopback).
+
+> **`REDIS_PASSWORD` y `REDIS_URL` se editan en la misma pasada, antes del
+> `up -d` del paso 2.** Son la misma clave en dos lugares: `REDIS_PASSWORD` es
+> la que exige el servidor y `REDIS_URL` es la única que lee la aplicación.
+> Si cambiás una sin la otra, el `up -d` recrea los contenedores y la
+> aplicación no logra hablar con Redis: `GET /health` devuelve 503
+> (`"redis":"down"`), así que `api` queda en `unhealthy` y `worker` **no
+> arranca**, porque su `depends_on` exige que `api` esté `healthy`. **No hay
+> degradación parcial: la sincronización de correo se detiene.**
+
+En el `.env` junto al compose, agregá y ajustá estas dos líneas juntas:
+
+```env
+REDIS_PASSWORD=<openssl rand -hex 32>
+REDIS_URL=redis://:<esa misma clave>@redis:6379
+```
+
+Los dos puntos delante de la clave no son un error de tipeo: `--requirepass`
+fija la contraseña del usuario `default` de Redis y no hay otro usuario que
+declarar, así que la parte de usuario de la URL va vacía. ioredis interpreta
+esa forma como "solo contraseña". También sirve `redis://default:CLAVE@...`;
+elegí una y usá la misma en todos lados.
+
+Si `REDIS_PASSWORD` falta o queda vacía, `docker compose up` **aborta** con el
+mensaje `REDIS_PASSWORD es obligatoria...` en vez de levantar un Redis sin
+contraseña que parezca configurado. Podés comprobarlo antes de tocar nada:
+
+```bash
+docker compose -f docker-compose.prod.yml config >/dev/null && echo "compose OK"
+```
+
+Después del `up -d` del paso 2, verificá que la autenticación quedó activa —
+el primer comando **tiene que fallar** y el segundo **tiene que responder
+`PONG`**:
+
+```bash
+# 1. Sin credenciales: rechazado (imprime "NOAUTH Authentication required.")
+docker compose -f docker-compose.prod.yml exec redis \
+  env -u REDISCLI_AUTH redis-cli ping
+
+# 2. Con credenciales (REDISCLI_AUTH ya viene en el entorno del contenedor)
+docker compose -f docker-compose.prod.yml exec redis redis-cli ping
+# -> PONG
+
+# 3. El contenedor quedó healthy (el healthcheck exige el PONG literal)
+docker compose -f docker-compose.prod.yml ps redis
+# -> STATUS: Up ... (healthy)
+```
+
+**Ojo con el primer comando**: `redis-cli ping` imprime el error `NOAUTH` pero
+termina con código de salida **0**. Por eso el healthcheck del compose no se
+conforma con el código de salida y exige el `PONG` literal
+(`redis-cli ping | grep -q PONG`); si te guiás por `echo $?` para juzgar si la
+autenticación está activa, te va a mentir. Mirá la salida impresa.
+
+El resto de los `docker compose ... exec redis redis-cli ...` de este runbook
+(pasos 3 y 7, sección 9) sigue funcionando sin cambios: el compose le pasa
+`REDISCLI_AUTH` al contenedor y `redis-cli` la toma sola. Lo que sí cambia es
+todo `redis-cli` o `REDIS_URL` que corra **desde el host** — ver el paso 6.
+
+Si después del `up -d` `api` queda `unhealthy` y `worker` no arranca, el
+sospechoso número uno es un `REDIS_URL` sin la clave o con una clave distinta a
+`REDIS_PASSWORD`:
+
+```bash
+curl -s http://127.0.0.1:3000/api/v1/health   # -> {"data":{"status":"error",...,"redis":"down"}}
+docker compose -f docker-compose.prod.yml logs api | grep -i "NOAUTH\|WRONGPASS"
+```
+
+### 2. Aplicar la migración
+
+La levanta el contenedor `api` al arrancar (`prisma migrate deploy`), igual que
+en 2.b, así que alcanza con el `up`:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml logs -f api | head -40   # confirmar "migrations have been successfully applied"
+```
+
+Comprobación directa de que las seis tablas quedaron con RLS forzado (`psql`
+entra con el rol **owner** `maildte`, que es superusuario y por lo tanto **no
+está sujeto a RLS** — por eso ve todo; el rol de la aplicación, `maildte_app`,
+sí lo está):
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT relname, relrowsecurity, relforcerowsecurity
+    FROM pg_class
+    WHERE relname IN ('dte_parties','dte_parse_results','purchase_documents',
+                      'purchase_document_items','purchase_document_taxes',
+                      'purchase_document_payments')
+    ORDER BY relname;
+  "
+```
+
+Las seis filas tienen que salir con `t` en las dos columnas.
+
+### 3. Confirmar que el worker consume la cola `dte`
+
+`WorkerModule` ahora importa `PurchaseBookIngestModule`, y `DteParseProcessor`
+registra el `Worker` de BullMQ en su `onModuleInit`.
+
+> **No busques una línea de arranque del processor: no existe.**
+> `DteParseProcessor` solo loguea cuando un job **falla**. Un worker sano no
+> escribe nada suyo al arrancar, así que "no aparece nada en los logs" no es
+> señal de problema.
+
+Lo que sí se puede verificar:
+
+```bash
+# 1. El módulo se cargó (línea de Nest, contexto InstanceLoader)
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.context == "InstanceLoader" and (.msg | test("PurchaseBookIngest")))'
+# -> {"context":"InstanceLoader","msg":"PurchaseBookIngestModule dependencies initialized"}
+
+# 2. Hay un consumidor conectado a la cola: BullMQ nombra la conexión del Worker
+#    "bull:" + el nombre de la cola en base64 ("dte" -> ZHRl)
+docker compose -f docker-compose.prod.yml exec redis \
+  redis-cli client list | grep "name=bull:ZHRl"
+```
+
+La verificación que de verdad importa es funcional y llega en el paso 6: si la
+cola se vacía y `dte_parse_results` crece, el worker está consumiendo.
+
+### 4. (Opcional) Ajustar las variables del libro de compras
+
+Las cuatro tienen valor por defecto en `src/config/env.validation.ts` y el
+despliegue funciona sin declarar ninguna. Van en el `.env` junto al compose.
+
+| Variable | Default | Cuándo moverla |
+|---|---|---|
+| `PURCHASE_BOOK_EXPORT_MAX_ROWS` | `20000` | Subirla solo si un cliente presenta anexos de más de 20.000 líneas por período. El XLSX se arma en memoria: el tope protege al proceso de la API, no al cliente. |
+| `PURCHASE_BOOK_REPROCESS_BATCH` | `1000` (máx. `5000`) | Tamaño de página del reprocesamiento y del backfill. Subirla acelera el encolado del paso 6 en instalaciones grandes; bajarla hace más chico cada golpe a la base. |
+| `DTE_MAX_JSON_BYTES` | `2097152` (2 MiB) | Subirla solo si aparecen adjuntos legítimos marcados `ARCHIVO_DEMASIADO_GRANDE`. Revisá el archivo primero: un DTE normal pesa kilobytes. |
+| `DTE_QUEUE_CONCURRENCY` | `4` (máx. `16`) | Lecturas simultáneas del worker. Subirla acorta el backfill, pero comparte el pool de Prisma con el sync: pasada de rosca, compite con la descarga de correo. |
+
+Cambiar cualquiera de ellas requiere `docker compose -f docker-compose.prod.yml up -d`
+para recrear los contenedores con el `.env` nuevo.
+
+### 5. Publicar el panel web
+
+```bash
+cd web && pnpm install && pnpm build     # deja el bundle en web/dist
+```
+
+Copiar `web/dist` a donde lo sirva el reverse proxy bajo `/panel`, igual que en
+2.b. El menú suma **Libro de compras**, con dos rutas nuevas:
+`/panel/libro-compras` (listado, detalle, clasificación Q–T y exportación) y
+`/panel/libro-compras/receptores` (valores por defecto del Anexo 3 por
+contribuyente).
+
+### 6. Backfill inicial — el paso que hace o rompe este despliegue
+
+El libro de compras se alimenta solo: cada JSON que archiva el sync se encola en
+la cola `dte`. **Pero todos los JSON archivados antes de este despliegue son
+anteriores al parser y nadie los encoló nunca.** Si este paso se saltea, el
+panel de libro de compras aparece vacío para todos los tenants y el problema no
+se manifiesta como un error: simplemente no hay datos.
+
+**Por qué un script y no el bucle HTTP del §9.** `POST /purchase-book/reprocess`
+es por tenant y exige un token **ADMIN de ese tenant**:
+`PurchaseBookService.reprocess` llama a `requireTenantId()`, que le responde
+`FORBIDDEN_ROLE` al SUPERADMIN, y no existe suplantación de tenant en ningún
+punto del sistema. Para un despliegue habría que pedirle una credencial a cada
+cliente. El script recorre todos los tenants con el rol de aplicación. El §9
+sigue siendo la vía correcta para reprocesar **un** tenant en operación normal.
+
+Corre **fuera** del contenedor (la imagen de producción no trae `ts-node`),
+igual que las semillas de la sección 1 y de 2.b. Necesita alcanzar Postgres
+**y** Redis desde el host:
+
+```bash
+cd /opt/maildte
+pnpm install                 # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate    # explícito, por si el postinstall no corrió
+
+# 1. Ensayo: cuenta qué se encolaría, sin tocar Redis
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte \
+REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 \
+pnpm run backfill:purchase-book -- --mode=missing --dry-run
+
+# 2. La corrida de verdad
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte \
+REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 \
+pnpm run backfill:purchase-book -- --mode=missing
+```
+
+El `REDIS_URL` del host **no es el mismo** que el del `.env`: lleva la misma
+clave (`REDIS_PASSWORD`, paso 1.b) pero apunta al puerto publicado
+(`127.0.0.1:6380`) en vez de al nombre de servicio interno `redis:6379`. Si la
+clave se generó con `openssl rand -hex 32` es hexadecimal y entra tal cual en
+la URL; una clave con `@`, `/`, `:` o `#` habría que percent-encodearla, así
+que conviene no usarlas.
+
+Con la clave mal puesta, el script **no encola nada y lo dice**: `addBulk`
+recibe `NOAUTH Authentication required`, `enqueueParseBulk` lo registra en
+nivel `error` y devuelve 0, y el backfill corta ese tenant. Cada fila del
+reporte sale con `0 ... (parcial); ERROR: Redis aceptó 0 de N trabajos del
+lote` y la corrida termina con código de salida distinto de cero. Corregir el
+`REDIS_URL` y repetir es seguro (el `jobId` es determinístico).
+
+**El `--dry-run` no sirve para validar la contraseña**: nunca llama a
+`enqueue`, así que una clave equivocada le pasa desapercibida y reporta los
+conteos como si todo estuviera bien. Si querés probar la conexión antes de la
+corrida larga, hacelo con `redis-cli` contra el puerto publicado:
+
+```bash
+redis-cli -u "redis://default:<REDIS_PASSWORD>@127.0.0.1:6380" ping
+# -> PONG
+```
+
+> **Detalle de `redis-cli`, no de la aplicación.** En la URL de `redis-cli` hay
+> que poner `default:` como usuario. Con la forma de usuario vacío
+> (`redis://:CLAVE@...`) `redis-cli` manda un `AUTH` con usuario `""` y el
+> servidor responde `WRONGPASS`, que parece una clave equivocada y no lo es.
+> El `REDIS_URL` de la aplicación **sí** funciona con la forma de usuario
+> vacío: ioredis la interpreta como "solo contraseña". Las dos formas son
+> válidas para `REDIS_URL`; la única que sirve para `redis-cli -u` es
+> `default:`.
+
+Salida, una línea por tenant y un total:
+
+```
+Backfill del libro de compras — modo missing, lote 1.000
+
+  tenant acme-sa           12.480 encolados
+  tenant distribuidora      3.902 encolados
+  tenant suspendida-sa           0 omitido (tenant no ACTIVO)
+  ------------------------------------------
+  2 tenants, 16.382 jobs encolados
+```
+
+Notas de uso:
+
+- `--mode` es **obligatorio** y no tiene valor por defecto. Para el despliegue
+  inicial es `missing` (solo lo que nunca pasó por el parser). `failed` y `all`
+  son los mismos modos del §9.
+- `--dry-run` cuenta sin encolar. Igual necesita las dos conexiones: lo que
+  evita es el encolado, no la conexión.
+- `--tenant=<slug o id>` acota a un solo tenant; `--batch=<n>` cambia el tamaño
+  de página (por defecto, `PURCHASE_BOOK_REPROCESS_BATCH`).
+- Los tenants que no están `ACTIVO` se enumeran pero no se encolan: el worker
+  los descartaría igual al consumir.
+- **Es seguro repetirlo.** El `jobId` es determinístico por adjunto, así que dos
+  corridas seguidas no duplican trabajo, y el script solo lee la base y encola:
+  no escribe ninguna tabla del libro de compras, no toca IMAP ni `lastUid`, y no
+  borra nada.
+- Si un tenant falla, el script sigue con los demás, lo marca en su fila y
+  termina con código de salida distinto de cero. El conteo de esa fila es el
+  **parcial** (lo que alcanzó a encolar antes de cortarse) y la fila lo dice:
+  `... encolados (parcial); ERROR: ...`. Repetir la corrida es seguro y retoma
+  lo que faltó.
+- **Corrélo dentro de `tmux` (o con `nohup`).** Sobre decenas de miles de
+  adjuntos la corrida dura minutos u horas y una caída del SSH mata el proceso:
+  `tmux new -s backfill` antes de empezar, `tmux attach -t backfill` para
+  volver. Cada tenant imprime su fila apenas termina, así que lo que ya salió en
+  pantalla es trabajo hecho aunque la corrida se corte después.
+
+### 7. Verificación post-despliegue
+
+```bash
+# 1. Cuánto falta por consumir en la cola
+docker compose -f docker-compose.prod.yml exec redis redis-cli llen bull:dte:wait
+
+# 2. Conciliación por tenant: JSON archivados contra filas del ledger.
+#    psql entra como el rol owner (maildte), que es superusuario y NO está
+#    sujeto al RLS que sí limita a maildte_app: por eso ve todos los tenants.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           count(*)               AS json_archivados,
+           count(r.id)            AS con_ledger,
+           count(*) - count(r.id) AS sin_leer
+    FROM tenants t
+    JOIN attachments a ON a.\"tenantId\" = t.id AND a.\"fileType\" = 'JSON'
+    LEFT JOIN dte_parse_results r ON r.\"attachmentId\" = a.id
+    GROUP BY t.slug
+    ORDER BY t.slug;
+  "
+
+# 3. Desglose de estados por tenant
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug, r.status, count(*)
+    FROM dte_parse_results r
+    JOIN tenants t ON t.id = r.\"tenantId\"
+    GROUP BY t.slug, r.status
+    ORDER BY t.slug, r.status;
+  "
+```
+
+**Cómo se leen juntas esas dos consultas.** Hay exactamente tres desenlaces y no
+conviene deducirlos: esta funcionalidad ya falló una vez en modo "todo se ve
+bien y no hace nada", así que la conclusión va escrita.
+
+| `llen bull:dte:wait` | `sin_leer` (tenants activos) | Estado | Qué hacer |
+|---|---|---|---|
+| `0` | `0` | **Terminado.** El backfill se consumió entero. | Nada. Seguir con el desglose de estados de abajo. |
+| `> 0` y **bajando** entre dos lecturas separadas por 60 s | `> 0` y bajando | **Todavía drenando.** El worker consume, falta tiempo. | Esperar. Medir el ritmo con las dos lecturas de `dte_parse_results` de "Cuánto tarda" y, si hace falta, subir `DTE_QUEUE_CONCURRENCY` (paso 4). |
+| `> 0` y **estancado** en dos lecturas separadas por 60 s | `> 0` sin moverse | **El worker no está consumiendo.** | Revisar el paso 3: `client list \| grep name=bull:ZHRl` (sin consumidor conectado, `PurchaseBookIngestModule` no arrancó) y los logs del worker (§9, "Seguir el trabajo en los logs"). Reiniciar el worker si el módulo no cargó. |
+
+Un cuarto caso que no es ninguno de los tres: **`llen` en 0 y `sin_leer` > 0**
+apenas terminado el script. Ahí la cola nunca recibió los trabajos. Buscar
+`"el lote se perdió"` en los logs (la API y el worker lo registran en nivel
+`error`) y volver a correr el backfill; si el script terminó con código 0 y sin
+filas `(parcial)`, el problema está del lado del consumo, no del encolado.
+
+Los estados que sí piden acción se miran por API, con un token ADMIN del tenant
+(la tabla de significados de cada estado está en el §9):
+
+```bash
+curl -s "$API/purchase-book/parse-results?status=ERROR" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data[] | {originalName: .attachment.originalName, errorDetail}'
+```
+
+`DUPLICADO` e `IGNORADO_TIPO` son resultados normales, no fallas: el primero es
+el mismo DTE llegado a dos buzones de la misma empresa y el segundo, un DTE que
+no es Comprobante de Crédito Fiscal.
+
+### Cuánto tarda
+
+El encolado (el script) es rápido: recorre la base por páginas y manda cada
+lote a Redis de una sola llamada. El cuello de botella es el **consumo**: el
+worker procesa `DTE_QUEUE_CONCURRENCY` archivos en paralelo (4 por defecto) y
+cada job lee un JSON del disco, lo normaliza y escribe el documento con sus
+ítems, tributos y pagos en una transacción.
+
+**No hay una medición de costo por job en producción**, así que lo que sigue es
+un orden de magnitud, no un número: con 4 en paralelo, 100.000 adjuntos van de
+unas decenas de minutos a unas pocas horas según lo que tarde cada lectura. Lo
+importante es que **no parece colgado**: se mide.
+
+```bash
+# Velocidad real: la diferencia entre las dos lecturas es lo procesado en 60 s
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -t -c "SELECT count(*) FROM dte_parse_results;"
+sleep 60
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -t -c "SELECT count(*) FROM dte_parse_results;"
+```
+
+Si hace falta acelerar, subir `DTE_QUEUE_CONCURRENCY` (paso 4) y recrear el
+worker. Recordá que comparte el pool de Prisma con la sincronización de correo:
+conviene hacerlo en una ventana de poco movimiento y volver al valor anterior
+al terminar el backfill.
+
+### Rollback
+
+La migración es aditiva y no destructiva, así que revertir es volver la imagen a
+la versión anterior:
+
+```bash
+git checkout <commit-anterior>
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Las seis tablas y el enum quedan en la base sin uso: el código viejo no los
+mira, y como ninguna tabla anterior cambió, la sincronización de correo sigue
+igual. Los documentos ya leídos **no se borran**: quedan en `purchase_documents`
+y en el ledger, y si más adelante se vuelve a desplegar el Addendum 10 siguen
+ahí — el backfill en `mode=missing` no los vuelve a encolar, porque ya tienen
+fila en `dte_parse_results`. Lo único que se pierde al revertir es el acceso:
+las rutas de la API y del panel dejan de existir.
+
+Si además se quiere devolver el `docker-compose.prod.yml` a su estado anterior,
+quitar el puerto publicado de `redis` no afecta a nada en runtime: solo lo usan
+los scripts de mantenimiento del host.
+
+**Quitar la contraseña de Redis es la operación inversa del paso 1.b y también
+se hace de una sola vez.** El `git checkout <commit-anterior>` devuelve el
+compose a un Redis sin `--requirepass`, así que en la misma pasada hay que
+volver `REDIS_URL` a `redis://redis:6379` en el `.env`. El orden importa
+distinto en cada sentido, y conviene tenerlo claro antes de tocar:
+
+- **Sacar la clave del `REDIS_URL` sin sacarla del servidor es fatal**: Redis
+  la sigue exigiendo, `api` y `worker` se quedan en `NOAUTH` y la
+  sincronización se detiene.
+- **El caso contrario es benigno**: si el servidor deja de pedirla y el
+  `REDIS_URL` todavía la lleva, ioredis conecta igual y solo deja un `[WARN]`
+  (`This Redis server's default user does not require a password, but a
+  password was supplied`). Es incómodo, no una caída.
+
+Por eso, si el rollback se hace por partes, sacala primero del **servidor** y
+después del `REDIS_URL`. Dejar la contraseña puesta también es una opción
+válida: no depende del Addendum 10 y no cuesta nada mantenerla.
 
 ---
 
@@ -563,3 +1012,199 @@ docker compose -f docker-compose.prod.yml start api worker
 podrían estar siendo escritos en ese instante — no es necesario para el
 *respaldo*, que es de solo lectura sobre el origen, pero sí para una
 *restauración* que sobrescribe.)
+
+---
+
+## 9. Libro de compras: backfill y reprocesamiento de DTE
+
+El libro de compras (Addendum 10) se alimenta solo: cada vez que el sync
+archiva un adjunto JSON, encola su lectura en la cola `dte` y el worker lo
+incorpora. El reprocesamiento manual hace falta en tres situaciones:
+
+1. **Después de desplegar el Addendum 10 por primera vez** — todos los JSON ya
+   archivados son anteriores al parser y nadie los encoló. **Ese caso no se
+   resuelve con esta sección**: es multi-tenant y el endpoint de acá exige un
+   token ADMIN de cada tenant (`requireTenantId()` le responde `FORBIDDEN_ROLE`
+   al SUPERADMIN). Va con el script `backfill:purchase-book` del **§2.c, paso
+   6**, que recorre todos los tenants desde el host. Lo de abajo es la vía para
+   reprocesar **un** tenant.
+2. **Si Redis estuvo caído durante un sync** — el correo se archivó igual (el
+   encolado no puede hacer fallar el archivado, a propósito), pero el trabajo
+   nunca llegó a la cola.
+3. **Al subir `PARSER_VERSION`** — hay documentos leídos con una versión
+   anterior de la normalización.
+
+### Diferencia con el §6
+
+El §6 vuelve a **descargar correos** del buzón IMAP. Esto **no toca el buzón ni
+`lastUid`**: solo relee archivos que ya están en disco. Por eso sí tiene
+endpoint de API y es seguro repetirlo cuantas veces haga falta.
+
+### Disparar el reprocesamiento
+
+Requiere un token de **ADMIN** del tenant (una API key no alcanza: son
+`MIEMBRO`). El endpoint responde por páginas con un cursor:
+
+```bash
+API=https://<host>/api/v1
+TOKEN=<accessToken de un ADMIN del tenant>
+
+# Modo "missing": solo los JSON que nunca se leyeron. Es el caso normal.
+curl -s -X POST "$API/purchase-book/reprocess" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"missing"}'
+# -> {"data":{"enqueued":500,"nextCursor":"<attachmentId>"}}
+```
+
+Mientras `nextCursor` no sea `null` hay más páginas. El bucle completo:
+
+```bash
+CURSOR=null
+TOTAL=0
+while : ; do
+  BODY=$([ "$CURSOR" = "null" ] \
+    && echo '{"mode":"missing"}' \
+    || echo "{\"mode\":\"missing\",\"cursor\":\"$CURSOR\"}")
+
+  RES=$(curl -s -X POST "$API/purchase-book/reprocess" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -d "$BODY")
+
+  TOTAL=$(( TOTAL + $(echo "$RES" | jq '.data.enqueued') ))
+  CURSOR=$(echo "$RES" | jq -r '.data.nextCursor')
+  echo "encolados hasta ahora: $TOTAL"
+  [ "$CURSOR" = "null" ] && break
+done
+```
+
+El panel web hace exactamente este bucle desde el botón **Reprocesar** de
+`/panel/libro-compras`; la vía `curl` es para cuando hay que acotar el alcance
+con más precisión o correrlo desatendido.
+
+**Modos disponibles:**
+
+| `mode` | Qué encola |
+|---|---|
+| `missing` | JSON sin fila en el ledger. El de todos los días. |
+| `failed` | Además los estados de error y los leídos con un `parserVersion` anterior. |
+| `all` | Todo el filtro, forzando la relectura. **Conserva la clasificación manual Q–T.** |
+
+Filtros opcionales para acotar (`accountId`, `month` sobre la carpeta mensual
+del correo, `from`/`to` sobre la fecha de recepción):
+
+```bash
+curl -s -X POST "$API/purchase-book/reprocess" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mode":"failed","accountId":"<accountId>","month":"2026-07"}'
+```
+
+El endpoint está limitado a 5 llamadas por minuto y cada página encola como
+máximo `PURCHASE_BOOK_REPROCESS_BATCH` (1000 por defecto) trabajos.
+
+**Si responde `503 PURCHASE_BOOK_QUEUE_UNAVAILABLE`**: la página tenía adjuntos
+para encolar y la cola `dte` no aceptó el lote (Redis caído, sin memoria o
+rechazando la escritura). No se encoló nada de esa página y el cursor no avanzó,
+así que **el bucle de arriba se corta ahí y hay que reintentarlo entero**: es
+seguro, el `jobId` es determinístico por adjunto. Antes de reintentar, mirar por
+qué no acepta la cola:
+
+```bash
+docker compose -f docker-compose.prod.yml exec redis redis-cli ping    # -> PONG
+docker compose -f docker-compose.prod.yml logs api | jq -c 'select(.msg | test("el lote se perdió"))'
+```
+
+Un `{"enqueued":0,"nextCursor":null}` es otra cosa y no es un error: significa
+que el filtro no encontró nada que encolar. La distinción es el motivo de que
+este 503 exista.
+
+### Revisar qué pasó con cada archivo
+
+El ledger tiene **una fila por adjunto JSON**, con el resultado de su lectura.
+También es ADMIN:
+
+```bash
+# Todo lo que no se pudo leer
+curl -s "$API/purchase-book/parse-results?status=ERROR" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data[] | {originalName: .attachment.originalName, errorDetail}'
+```
+
+Estados y qué significan:
+
+| Estado | Significado | ¿Requiere acción? |
+|---|---|---|
+| `PARSEADO` | Incorporado al libro. | No. |
+| `DUPLICADO` | El mismo `codigoGeneracion` ya estaba registrado desde otro adjunto del tenant. Pasa cuando el proveedor manda el DTE a dos buzones de la misma empresa. `documentId` apunta al documento canónico. | **No.** Es el comportamiento correcto, no un error. |
+| `IGNORADO_TIPO` | Es un DTE válido pero no es Comprobante de Crédito Fiscal (`tipoDte` distinto de `03`). | No. El libro de compras solo incorpora el `03`. |
+| `VERSION_NO_SOPORTADA` | `identificacion.version` fuera de {3, 4}. | Sí: probablemente Hacienda publicó una versión nueva del esquema. |
+| `NO_ES_DTE` | JSON válido que no tiene estructura de DTE. Suele ser otro adjunto `.json` cualquiera. | No, salvo que el proveedor deba estar mandando un DTE. |
+| `JSON_INVALIDO` | El archivo no es JSON parseable. Emisor con un generador roto. | Sí: pedirle el documento de nuevo al proveedor. |
+| `ARCHIVO_FALTANTE` | La fila existe pero el archivo ya no está en el storage. | Sí: revisar respaldos (§8). |
+| `ARCHIVO_DEMASIADO_GRANDE` | Excede `DTE_MAX_JSON_BYTES` (2 MiB por defecto). | Revisar el archivo antes de subir el límite. |
+| `ERROR` | Faltan campos obligatorios o tienen un tipo inesperado. `errorDetail` lista cada uno con su ruta (`resumen.totalGravada: campo obligatorio ausente`). | Sí: el DTE está mal formado en origen. |
+
+Tras corregir la causa, `mode=failed` vuelve a intentar solo lo que falló.
+
+### Seguir el trabajo en los logs del worker
+
+El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y
+`codigoGeneracion`. **Nunca loguea el contenido del JSON ni nombres o
+direcciones del documento.**
+
+```bash
+# Todo lo del parseo de DTE
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.context == "DteIngestService" or .context == "DteParseProcessor")'
+
+# Un archivo puntual, de punta a punta
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.attachmentId == "<attachmentId>")'
+
+# Solo los trabajos que fallaron y se van a reintentar
+docker compose -f docker-compose.prod.yml logs worker \
+  | jq -c 'select(.context == "DteParseProcessor" and .level >= 50)'
+```
+
+Los fallos deterministas (JSON roto, archivo faltante, tipo ignorado) **no se
+reintentan**: quedan en el ledger y el trabajo termina bien. Solo se reintentan
+los fallos de infraestructura, hasta 3 veces con espera creciente.
+
+### Variables que gobiernan este flujo
+
+| Variable | Default | Para qué |
+|---|---|---|
+| `DTE_QUEUE_CONCURRENCY` | `4` | Lecturas simultáneas en el worker. Comparte el pool de Prisma con el sync: subirlo mucho compite con la descarga de correo. |
+| `DTE_MAX_JSON_BYTES` | `2097152` | Tope de tamaño del JSON antes de leerlo. |
+| `PURCHASE_BOOK_REPROCESS_BATCH` | `1000` | Máximo de trabajos por página del reprocesamiento. |
+| `PURCHASE_BOOK_EXPORT_MAX_ROWS` | `20000` | Tope de filas del Anexo 3. Por encima, el export responde `422 EXPORT_TOO_LARGE`. |
+
+### El export del Anexo 3 devuelve 422
+
+Cinco causas, todas con mensaje explícito en el cuerpo:
+
+- `PURCHASE_BOOK_EMPTY` — el filtro no incluye ninguna compra.
+- `EXPORT_TOO_LARGE` — más filas que `PURCHASE_BOOK_EXPORT_MAX_ROWS`. Acotar el
+  período.
+- `PURCHASE_BOOK_UNCLASSIFIED` — hay compras sin las columnas Q–T resueltas.
+  Se arregla configurando los valores por defecto del receptor en
+  `/panel/libro-compras/receptores`, o clasificando cada compra desde su
+  detalle. Exportar igual con `allowUnclassified=true` genera un archivo con
+  esas columnas vacías, que Hacienda puede rechazar.
+- `PURCHASE_BOOK_MULTIPLE_RECEPTORS` — el conjunto a exportar tiene compras de
+  más de un receptor. El Anexo 3 se presenta por contribuyente: un archivo
+  mezclado declararía compras de otra empresa. Se arregla exportando un receptor
+  por vez. El parámetro `receptorId` es obligatorio en `/purchase-book/export`,
+  así que este error indica una regresión del armado del filtro, no un uso
+  incorrecto: si aparece, hay que revisar `buildPurchaseDocumentWhere` antes de
+  volver a exportar.
+
+- `PURCHASE_BOOK_RECEPTOR_REQUIRED` — el export llegó al servicio sin
+  `receptorId`. El Anexo 3 se presenta por contribuyente: sin receptor el
+  archivo no es presentable. Igual que el error anterior, indica una regresión y
+  no un uso incorrecto: el DTO ya devuelve `400` antes de llegar acá, así que si
+  aparece hay que revisar la validación de `ExportPurchaseBookDto` (un
+  `@IsOptional()` heredado ya la dejó inerte una vez) antes de volver a exportar.
+
+Además, un export sin `receptorId` responde `400` desde el `ValidationPipe`
+(`"receptorId debe ser un UUID válido"`). No es un error de datos: el anexo no
+existe sin un contribuyente que lo presente.

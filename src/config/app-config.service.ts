@@ -61,6 +61,22 @@ export class AppConfigService {
     return this.config.getOrThrow<number>('EXPORT_MAX_ZIP_FILES');
   }
 
+  get purchaseBookExportMaxRows(): number {
+    return this.config.getOrThrow<number>('PURCHASE_BOOK_EXPORT_MAX_ROWS');
+  }
+
+  get purchaseBookReprocessBatch(): number {
+    return this.config.getOrThrow<number>('PURCHASE_BOOK_REPROCESS_BATCH');
+  }
+
+  get dteMaxJsonBytes(): number {
+    return this.config.getOrThrow<number>('DTE_MAX_JSON_BYTES');
+  }
+
+  get dteQueueConcurrency(): number {
+    return this.config.getOrThrow<number>('DTE_QUEUE_CONCURRENCY');
+  }
+
   get corsOrigins(): string[] {
     return this.config
       .getOrThrow<string>('CORS_ORIGIN')

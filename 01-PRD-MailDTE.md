@@ -46,8 +46,12 @@ Las empresas receptoras de DTE reciben cientos de facturas electrónicas por cor
 8. Cifrado de credenciales de correo en reposo (AES-256-GCM).
 
 ### Incluido (Fase 2 — post-MVP)
-- Panel web de administración (React) con dashboard de estadísticas.
-- Parseo del contenido del JSON DTE (código de generación, NIT emisor, monto, tipo de documento) para búsqueda avanzada.
+- ✅ **Implementado** — Panel web de administración (React) con dashboard de estadísticas.
+- ✅ **Implementado** — Parseo del contenido del JSON DTE. Superó el alcance previsto de
+  "búsqueda avanzada": el Addendum 10 normaliza el Comprobante de Crédito Fiscal completo
+  (identificación, emisor, receptor, resumen y cuerpo del documento, esquemas v3 y v4) y
+  con eso genera el **libro de compras** y el **Anexo 3 "Detalle de Compras"** del
+  Ministerio de Hacienda en CSV y XLSX. Ver `10-ADDENDUM-LIBRO-COMPRAS.md`.
 - Notificaciones (correo/webhook) ante fallos de sincronización.
 - OAuth2 para Gmail/Microsoft 365 (además de app passwords).
 

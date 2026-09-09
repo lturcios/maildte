@@ -1,0 +1,135 @@
+{
+  "identificacion": {
+    "version": 4,
+    "ambiente": "00",
+    "tipoDte": "03",
+    "numeroControl": "DTE-03-M001P001-000000000000125",
+    "codigoGeneracion": "0B4E2221-74CF-4550-A451-31BBFB5CC9FD",
+    "tipoModelo": 1,
+    "tipoOperacion": 1,
+    "fecEmi": "2026-05-28",
+    "horEmi": "23:56:25",
+    "tipoMoneda": "USD",
+    "tipoContingencia": null,
+    "motivoContin": null
+  },
+  "documentoRelacionado": null,
+  "emisor": {
+    "nit": "027561310",
+    "nrc": "2717556",
+    "nombre": "LUIS ANTONIO TURCIOS ALVAREZ",
+    "codActividad": "95110",
+    "descActividad": "Reparación de computadoras y equipo periférico",
+    "nombreComercial": "LTSOFT INGENIERIA INFORMATICA LO MEJOR",
+    "codEstable": "M001",
+    "codPuntoVenta": "P001",
+    "direccion": {
+      "departamento": "12",
+      "municipio": "22",
+      "distrito": "17",
+      "complemento": "POLIG. D BLOCK D, COL. HIRLEMAN, # 17,"
+    },
+    "telefono": "60074974",
+    "correo": "l.turcios.08@gmail.com"
+  },
+  "receptor": {
+    "nombre": "PROTECCION DE VALORES SA DE CV",
+    "direccion": {
+      "departamento": "07",
+      "municipio": "17",
+      "distrito": "10",
+      "complemento": "CALLE A ONUALCO AV.CHAPARRASTIQUE #J-21 ZONAFRANCA SAN JOAQUIN"
+    },
+    "telefono": "60074974",
+    "correo": "l_turcios@hotmail.com",
+    "codActividad": "46900",
+    "descActividad": "Venta al por mayor de otros productos",
+    "nit": "06140203901028",
+    "nrc": "54038",
+    "nombreComercial": "PROTECCION DE VALORES SA DE CV"
+  },
+  "otrosDocumentos": null,
+  "ventaTercero": null,
+  "cuerpoDocumento": [
+    {
+      "numItem": 1,
+      "tipoItem": 1,
+      "numeroDocumento": null,
+      "cantidad": 1,
+      "codigo": "14",
+      "codTributo": null,
+      "uniMedida": 59,
+      "descripcion": "Audífonos Gaming con Micrófono",
+      "precioUni": 59,
+      "montoDescu": 0,
+      "noGravado": 0,
+      "ventaNoSuj": 0,
+      "ventaExenta": 0,
+      "ventaGravada": 59,
+      "tributos": [
+        "20"
+      ],
+      "psv": 0
+    },
+    {
+      "numItem": 2,
+      "tipoItem": 1,
+      "numeroDocumento": null,
+      "cantidad": 1,
+      "codigo": "13",
+      "codTributo": null,
+      "uniMedida": 59,
+      "descripcion": "Disco SSD SATA 1TB",
+      "precioUni": 85,
+      "montoDescu": 0,
+      "noGravado": 0,
+      "ventaNoSuj": 0,
+      "ventaExenta": 0,
+      "ventaGravada": 85,
+      "tributos": [
+        "20"
+      ],
+      "psv": 0
+    }
+  ],
+  "resumen": {
+    "totalNoSuj": 0,
+    "totalExenta": 0,
+    "totalGravada": 144,
+    "subTotalVentas": 144,
+    "descuNoSuj": 0,
+    "descuExenta": 0,
+    "descuGravada": 0,
+    "porcentajeDescuento": 0,
+    "totalDescu": 0,
+    "tributos": [
+      {
+        "codigo": "20",
+        "descripcion": "Impuesto al Valor Agregado 13%",
+        "valor": 18.72
+      }
+    ],
+    "subTotal": 144,
+    "montoTotalOperacion": 162.72,
+    "totalNoGravado": 0,
+    "totalPagar": 162.72,
+    "totalLetras": "CIENTO SESENTA Y DOS 72/100 DÓLARES",
+    "saldoFavor": 0,
+    "condicionOperacion": 1,
+    "pagos": [
+      {
+        "codigo": "01",
+        "montoPago": 162.72,
+        "referencia": null,
+        "plazo": null,
+        "periodo": null
+      }
+    ],
+    "numPagoElectronico": null,
+    "observaciones": null,
+    "ivaPerci": 0,
+    "ivaRete": 0
+  },
+  "apendice": null,
+  "selloRecibido": "2026B1591266E75846B2AEDD0B497DB9C0B8BWLG"
+}
