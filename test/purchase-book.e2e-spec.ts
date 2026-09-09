@@ -36,7 +36,16 @@ describe('Libro de compras (e2e)', () => {
 
   let docV3Id: string;
   let docV4Id: string;
+  let receptorV3Id: string;
   let receptorV4Id: string;
+
+  /**
+   * Los dos DTE de muestra están dirigidos a receptores distintos: es el caso
+   * real de un buzón que recibe compras de varios clientes, y el que obliga a
+   * que el export del Anexo 3 abarque un solo contribuyente.
+   */
+  const RECEPTOR_V3_NIT = '12171609731022';
+  const RECEPTOR_V4_NIT = '06140203901028';
 
   const accountA1 = randomUUID();
   const accountA2 = randomUUID();
@@ -205,7 +214,9 @@ describe('Libro de compras (e2e)', () => {
       where: { tenantId: tenantA.id },
       select: { id: true, version: true, receptorId: true },
     });
-    docV3Id = docs.find((d) => d.version === 3)!.id;
+    const v3 = docs.find((d) => d.version === 3)!;
+    docV3Id = v3.id;
+    receptorV3Id = v3.receptorId;
     const v4 = docs.find((d) => d.version === 4)!;
     docV4Id = v4.id;
     receptorV4Id = v4.receptorId;
@@ -545,10 +556,19 @@ describe('Libro de compras (e2e)', () => {
     });
   });
   /**
-   * El endpoint de export está limitado a 10 llamadas por minuto (Addendum 10,
-   * §10.6). Estos tests consolidan varias aserciones por respuesta a propósito:
-   * pedir el mismo archivo una vez por aserción agotaría el límite y los tests
-   * empezarían a recibir 429 en vez de probar lo que dicen probar.
+   * El endpoint de export está limitado a 10 llamadas por minuto
+   * (`@Throttle` en `PurchaseBookController.export`; tabla de la API en el
+   * Addendum 10, §7). Estos tests consolidan varias aserciones por respuesta a
+   * propósito: pedir el mismo archivo una vez por aserción agotaría el límite y
+   * los tests empezarían a recibir 429 en vez de probar lo que dicen probar.
+   *
+   * PRESUPUESTO: este describe usa exactamente 10 peticiones a `/export`, o sea
+   * el límite completo. Antes de agregar una, hay que sacar otra o subir el
+   * `@Throttle`; si no, aparecen 429 intermitentes que parecen fallos ajenos.
+   *
+   * Toda petición de export afirma su `status` ANTES de leer el cuerpo. Un 422
+   * devuelve JSON, y parsearlo como CSV produce aserciones que pasan sin probar
+   * nada: ya ocurrió una vez en esta suite.
    */
   describe('exportación del Anexo 3', () => {
     /** Lee la respuesta como Buffer, para poder inspeccionar los bytes crudos. */
@@ -567,9 +587,48 @@ describe('Libro de compras (e2e)', () => {
         .split('\r\n')
         .filter((line) => line.length > 0);
 
+    /**
+     * La columna D lleva el código de generación sin guiones. Se le devuelven
+     * para poder buscar el documento en la base y verificar a qué receptor
+     * pertenece cada fila realmente emitida.
+     */
+    const restoreCodigoGeneracion = (cell: string): string =>
+      [
+        cell.slice(0, 8),
+        cell.slice(8, 12),
+        cell.slice(12, 16),
+        cell.slice(16, 20),
+        cell.slice(20),
+      ].join('-');
+
+    /** Segundo documento del MISMO receptor que v4, en un mes anterior. */
+    let docAbrilId: string;
+
     beforeAll(async () => {
-      // Ambos documentos clasificados: si no, el export se bloquea con 422.
-      for (const id of [docV3Id, docV4Id]) {
+      // Un segundo documento del receptor de v4 permite probar el orden y la
+      // homogeneidad del archivo sin mezclar contribuyentes.
+      const abril = JSON.parse(JSON.stringify(ccfV4)) as typeof ccfV4;
+      abril.identificacion.codigoGeneracion = 'A1B2C3D4-1111-4222-8333-444455556666';
+      abril.identificacion.numeroControl = 'DTE-03-M001P001-000000000000099';
+      abril.identificacion.fecEmi = '2026-04-09';
+
+      const attAbril = await seedDteAttachment({
+        tenant: tenantA,
+        accountId: accountA1,
+        folderName: 'compras_a1',
+        dte: abril,
+        fileName: 'ccf-v4-abril.json',
+      });
+      await ingest.ingestAttachment(tenantA.id, attAbril);
+      docAbrilId = (
+        await prisma.purchaseDocument.findFirstOrThrow({
+          where: { tenantId: tenantA.id, codigoGeneracion: abril.identificacion.codigoGeneracion },
+          select: { id: true },
+        })
+      ).id;
+
+      // Todos clasificados: si no, el export se bloquea con 422.
+      for (const id of [docV3Id, docV4Id, docAbrilId]) {
         await patchAsAdmin(`/purchase-book/documents/${id}/classification`).send({
           anexoTipoOperacion: 1,
           anexoClasificacion: 2,
@@ -584,15 +643,17 @@ describe('Libro de compras (e2e)', () => {
       let body: Buffer;
 
       beforeAll(async () => {
-        res = await asBuffer('/purchase-book/export?format=csv&month=2026-05');
+        res = await asBuffer(
+          `/purchase-book/export?format=csv&month=2026-05&receptorId=${receptorV4Id}`,
+        );
         body = res.body as Buffer;
       });
 
-      it('responde con el content-type y el nombre de archivo correctos', () => {
+      it('responde con el content-type y el nombre de archivo con el NIT del receptor', () => {
         expect(res.status).toBe(200);
         expect(res.headers['content-type']).toContain('text/csv');
         expect(res.headers['content-disposition']).toBe(
-          'attachment; filename="compras_2026-05.csv"',
+          `attachment; filename="compras_${RECEPTOR_V4_NIT}_2026-05.csv"`,
         );
       });
 
@@ -621,59 +682,107 @@ describe('Libro de compras (e2e)', () => {
 
       it('aplica la regla E/P según la longitud del identificador', async () => {
         const marzo = await asBuffer(
-          '/purchase-book/export?format=csv&from=2026-03-01&to=2026-03-31',
+          `/purchase-book/export?format=csv&from=2026-03-01&to=2026-03-31&receptorId=${receptorV3Id}`,
         );
+        // Antes de tocar el cuerpo: un 422 es JSON y parsearlo como CSV daría
+        // aserciones que pasan sin probar nada.
+        expect(marzo.status).toBe(200);
         const fields = lines(marzo.body as Buffer)[0].split(';');
 
         // El emisor de la muestra v3 tiene 9 dígitos: va en P, no en E.
         expect(fields[4]).toBe('');
         expect(fields[15]).toBe('040522092');
+
+        // Otro receptor, otro nombre de archivo: dos clientes del mismo
+        // operador no pueden terminar con archivos indistinguibles.
+        expect(marzo.headers['content-disposition']).toBe(
+          `attachment; filename="compras_${RECEPTOR_V3_NIT}_2026-03-01.csv"`,
+        );
       });
 
-      it('exporta ordenado por fecha de emisión ascendente', async () => {
-        const todos = await asBuffer('/purchase-book/export?format=csv');
+      /**
+       * Validez fiscal del archivo, no formato de las columnas: el Anexo 3 se
+       * presenta por contribuyente, así que TODAS las filas emitidas tienen que
+       * pertenecer al mismo receptor. El receptor no viaja en ninguna de las 21
+       * columnas, así que se reconstruye mapeando la columna D (código de
+       * generación sin guiones) contra la base.
+       */
+      it('exporta un único contribuyente, ordenado por fecha de emisión ascendente', async () => {
+        const todos = await asBuffer(`/purchase-book/export?format=csv&receptorId=${receptorV4Id}`);
         const rows = lines(todos.body as Buffer);
 
+        expect(todos.status).toBe(200);
         expect(rows).toHaveLength(2);
-        expect(rows[0].split(';')[0]).toBe('19/03/2026');
+        expect(rows[0].split(';')[0]).toBe('09/04/2026');
         expect(rows[1].split(';')[0]).toBe('28/05/2026');
+
+        const exportados = await prisma.purchaseDocument.findMany({
+          where: {
+            tenantId: tenantA.id,
+            codigoGeneracion: { in: rows.map((row) => restoreCodigoGeneracion(row.split(';')[3])) },
+          },
+          select: { receptorId: true, receptorNit: true },
+        });
+
+        expect(exportados).toHaveLength(rows.length);
+        expect(new Set(exportados.map((doc) => doc.receptorId)).size).toBe(1);
+        expect(new Set(exportados.map((doc) => doc.receptorNit))).toEqual(
+          new Set([RECEPTOR_V4_NIT]),
+        );
       });
 
       it('un tenant no exporta las compras de otro', async () => {
-        const otro = await asBuffer('/purchase-book/export?format=csv', apiKeyB);
-        const rows = lines(otro.body as Buffer);
+        // El receptor es del tenant A: para el tenant B el filtro no existe.
+        const otro = await get(
+          `/purchase-book/export?format=csv&receptorId=${receptorV4Id}`,
+          apiKeyB,
+        );
 
-        expect(rows).toHaveLength(1);
-        expect(rows[0]).not.toContain('040522092');
+        expect(otro.status).toBe(422);
+        expect(otro.body.error).toBe('PURCHASE_BOOK_EMPTY');
       });
     });
 
     it('el XLSX es un libro OOXML válido', async () => {
-      const res = await asBuffer('/purchase-book/export?format=xlsx&month=2026-05');
+      const res = await asBuffer(
+        `/purchase-book/export?format=xlsx&month=2026-05&receptorId=${receptorV4Id}`,
+      );
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('spreadsheetml.sheet');
       expect(res.headers['content-disposition']).toBe(
-        'attachment; filename="compras_2026-05.xlsx"',
+        `attachment; filename="compras_${RECEPTOR_V4_NIT}_2026-05.xlsx"`,
       );
       expect((res.body as Buffer).subarray(0, 2).toString('ascii')).toBe('PK');
     });
 
     describe('validaciones previas al streaming', () => {
-      it('rechaza un formato desconocido', async () => {
-        const res = await get('/purchase-book/export?format=pdf');
+      /**
+       * Las dos validaciones del DTO comparten una sola petición a propósito:
+       * el `ValidationPipe` acumula todos los errores en la misma respuesta y el
+       * endpoint tiene 10 llamadas por minuto. Se afirman ambos mensajes, así
+       * que ninguna de las dos reglas puede romperse sin que el test falle.
+       */
+      it('rechaza un export sin receptorId y con formato desconocido', async () => {
+        const res = await get('/purchase-book/export?format=pdf&month=2026-05');
+
         expect(res.status).toBe(400);
+        // Sin receptor no hay Anexo 3 posible: se presenta por contribuyente.
+        expect(res.body.message).toContain('receptorId debe ser un UUID válido');
+        expect(res.body.message).toContain('format debe ser csv o xlsx');
       });
 
       it('rechaza con 422 un filtro sin compras', async () => {
-        const res = await get('/purchase-book/export?format=csv&month=2019-01');
+        const res = await get(
+          `/purchase-book/export?format=csv&month=2019-01&receptorId=${receptorV4Id}`,
+        );
         expect(res.status).toBe(422);
         expect(res.body.error).toBe('PURCHASE_BOOK_EMPTY');
       });
 
       it('SUPERADMIN no puede exportar', async () => {
         const res = await request(app.getHttpServer())
-          .get('/api/v1/purchase-book/export?format=csv')
+          .get(`/api/v1/purchase-book/export?format=csv&receptorId=${receptorV4Id}`)
           .set('Authorization', `Bearer ${superadminToken}`);
 
         expect(res.status).toBe(403);
@@ -695,12 +804,14 @@ describe('Libro de compras (e2e)', () => {
         defaultTipoCostoGasto: null,
       });
 
-      const bloqueado = await get('/purchase-book/export?format=csv&month=2026-05');
+      const bloqueado = await get(
+        `/purchase-book/export?format=csv&month=2026-05&receptorId=${receptorV4Id}`,
+      );
       expect(bloqueado.status).toBe(422);
       expect(bloqueado.body.error).toBe('PURCHASE_BOOK_UNCLASSIFIED');
 
       const permitido = await asBuffer(
-        '/purchase-book/export?format=csv&month=2026-05&allowUnclassified=true',
+        `/purchase-book/export?format=csv&month=2026-05&receptorId=${receptorV4Id}&allowUnclassified=true`,
       );
       expect(permitido.status).toBe(200);
       const fields = lines(permitido.body as Buffer)[0].split(';');

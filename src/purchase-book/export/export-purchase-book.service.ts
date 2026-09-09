@@ -13,8 +13,17 @@ import { ExportPurchaseBookDto } from '../dto/export-purchase-book.dto';
 /** Tamaño de lote del recorrido por cursor. */
 const BATCH_SIZE = 500;
 
+/** Todo lo que no puede viajar en el nombre del archivo ni en un header HTTP. */
+const NON_FILENAME_SAFE_NIT = /[^A-Za-z0-9]/g;
+
 export interface AnexoExportResult {
   rows: AnexoCell[][];
+  /**
+   * NIT del receptor del archivo. Todas las filas comparten receptor por
+   * construcción (`receptorId` es obligatorio y `collectRows` lo verifica), así
+   * que este dato identifica al contribuyente que declara y nombra el archivo.
+   */
+  receptorNit: string;
   /** Anomalías acumuladas, para loguear y avisar al contador. */
   anomalies: {
     supplierId: number;
@@ -48,6 +57,22 @@ export class ExportPurchaseBookService {
    */
   async collectRows(ctx: TenantContext, dto: ExportPurchaseBookDto): Promise<AnexoExportResult> {
     const tenantId = this.requireTenantId(ctx);
+
+    // El DTO ya declara `receptorId` como obligatorio, pero esta guarda no
+    // sobra: esa validación falló una vez en silencio, porque un `@IsOptional()`
+    // heredado de la clase base cortocircuitaba el validador de la subclase y el
+    // `ValidationPipe` dejaba pasar el export sin receptor. La consecuencia no es
+    // un error visible sino un archivo fiscalmente inválido, que mezcla en la
+    // declaración de una empresa las compras de otra. El servicio no confía en la
+    // capa de validación para una condición de validez fiscal.
+    if (!dto.receptorId) {
+      throw new UnprocessableEntityException({
+        error: 'PURCHASE_BOOK_RECEPTOR_REQUIRED',
+        message:
+          'El Anexo 3 se presenta por contribuyente: hay que elegir un receptor antes de exportar.',
+      });
+    }
+
     const where = buildPurchaseDocumentWhere(tenantId, dto);
 
     const [total, unclassified] = await this.prisma.withTenant(tenantId, (tx) =>
@@ -79,6 +104,27 @@ export class ExportPurchaseBookService {
       });
     }
 
+    // Defensa en profundidad sobre `buildPurchaseDocumentWhere`, que ya filtra
+    // por `receptorId`. Se repite acá porque la falla es silenciosa y fiscal: un
+    // archivo con dos receptores no se rompe, se ve normal y declara las compras
+    // de otra empresa dentro de la declaración propia. Si alguna vez el armado
+    // del `where` deja de aplicar el filtro, esto lo convierte en un 422 visible
+    // en vez de un anexo mal presentado.
+    //
+    // Va DESPUÉS de las guardas de filtro vacío y de tope de filas: así nunca
+    // recorre un conjunto sin acotar y el usuario recibe primero el error que
+    // realmente describe su filtro.
+    const receptorGroups = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.purchaseDocument.groupBy({ by: ['receptorId'], where }),
+    );
+
+    if (receptorGroups.length > 1) {
+      throw new UnprocessableEntityException({
+        error: 'PURCHASE_BOOK_MULTIPLE_RECEPTORS',
+        message: `El filtro incluye compras de ${receptorGroups.length} receptores. El Anexo 3 se presenta por contribuyente: el export tiene que abarcar un solo receptor.`,
+      });
+    }
+
     const rows = await this.buildRows(tenantId, where, total);
 
     if (rows.anomalies.supplierId > 0 || rows.anomalies.totalMismatch > 0) {
@@ -106,6 +152,10 @@ export class ExportPurchaseBookService {
 
     let cursor: string | undefined;
 
+    // Todos los documentos del filtro comparten receptor, así que alcanza con
+    // leerlo de las filas que ya se recorren: no se agrega otra consulta.
+    let receptorNit = '';
+
     // El orden es ascendente por fecha de emisión: es como el contador espera
     // leer el anexo y como lo revisa contra sus comprobantes.
     while (rows.length < total) {
@@ -122,6 +172,7 @@ export class ExportPurchaseBookService {
       if (batch.length === 0) break;
 
       for (const doc of batch) {
+        if (!receptorNit) receptorNit = doc.receptorNit;
         const row = buildAnexoRow(doc, doc.receptor);
         rows.push(row.cells);
         accumulate(anomalies, row.flags);
@@ -131,13 +182,34 @@ export class ExportPurchaseBookService {
       if (batch.length < BATCH_SIZE) break;
     }
 
-    return { rows, anomalies };
+    return { rows, receptorNit, anomalies };
   }
 
-  /** Nombre del archivo, saneado y con componentes ASCII. */
-  buildFileName(dto: ExportPurchaseBookDto, extension: string): string {
+  /**
+   * Nombre del archivo, saneado y con componentes ASCII.
+   *
+   * El NIT del receptor va en el nombre porque un mismo operador exporta el
+   * anexo de varios contribuyentes: sin él, dos archivos del mismo período son
+   * indistinguibles en la carpeta de descargas y es fácil presentar el del
+   * cliente equivocado.
+   *
+   * El NIT se acota a `[A-Za-z0-9]` antes de entrar al nombre. No es cosmético:
+   * el valor viene del JSON del DTE, o sea de quien envía el correo, y el parser
+   * solo exige que no esté vacío (`getRequiredString`). `sanitizeFilename` quita
+   * separadores y caracteres de control, pero deja pasar cualquier punto de
+   * código sobre U+00FF, y `res.setHeader` lanza `ERR_INVALID_CHAR` con esos
+   * valores en `Content-Disposition`. Como el NIT queda persistido, un solo DTE
+   * con un carácter así dejaría el export de ese receptor devolviendo 500 de
+   * forma permanente. Un NIT legítimo es alfanumérico, así que acotarlo no
+   * pierde información real.
+   */
+  buildFileName(dto: ExportPurchaseBookDto, extension: string, receptorNit: string): string {
     const period = dto.month ?? dto.from ?? new Date().toISOString().slice(0, 10);
-    return sanitizeFilename(`compras_${period}.${extension}`);
+    // El fallback cubre un NIT ilegible y el caso en que no se leyó ninguna
+    // fila: el nombre nunca queda con un segmento vacío. La validez fiscal del
+    // archivo no depende del nombre, así que degrada en vez de fallar.
+    const nit = receptorNit.replace(NON_FILENAME_SAFE_NIT, '') || 'sin-nit';
+    return sanitizeFilename(`compras_${nit}_${period}.${extension}`);
   }
 
   private requireTenantId(ctx: TenantContext): string {

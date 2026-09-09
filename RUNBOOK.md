@@ -718,7 +718,7 @@ los fallos de infraestructura, hasta 3 veces con espera creciente.
 
 ### El export del Anexo 3 devuelve 422
 
-Tres causas, todas con mensaje explícito en el cuerpo:
+Cinco causas, todas con mensaje explícito en el cuerpo:
 
 - `PURCHASE_BOOK_EMPTY` — el filtro no incluye ninguna compra.
 - `EXPORT_TOO_LARGE` — más filas que `PURCHASE_BOOK_EXPORT_MAX_ROWS`. Acotar el
@@ -728,3 +728,21 @@ Tres causas, todas con mensaje explícito en el cuerpo:
   `/panel/libro-compras/receptores`, o clasificando cada compra desde su
   detalle. Exportar igual con `allowUnclassified=true` genera un archivo con
   esas columnas vacías, que Hacienda puede rechazar.
+- `PURCHASE_BOOK_MULTIPLE_RECEPTORS` — el conjunto a exportar tiene compras de
+  más de un receptor. El Anexo 3 se presenta por contribuyente: un archivo
+  mezclado declararía compras de otra empresa. Se arregla exportando un receptor
+  por vez. El parámetro `receptorId` es obligatorio en `/purchase-book/export`,
+  así que este error indica una regresión del armado del filtro, no un uso
+  incorrecto: si aparece, hay que revisar `buildPurchaseDocumentWhere` antes de
+  volver a exportar.
+
+- `PURCHASE_BOOK_RECEPTOR_REQUIRED` — el export llegó al servicio sin
+  `receptorId`. El Anexo 3 se presenta por contribuyente: sin receptor el
+  archivo no es presentable. Igual que el error anterior, indica una regresión y
+  no un uso incorrecto: el DTO ya devuelve `400` antes de llegar acá, así que si
+  aparece hay que revisar la validación de `ExportPurchaseBookDto` (un
+  `@IsOptional()` heredado ya la dejó inerte una vez) antes de volver a exportar.
+
+Además, un export sin `receptorId` responde `400` desde el `ValidationPipe`
+(`"receptorId debe ser un UUID válido"`). No es un error de datos: el anexo no
+existe sin un contribuyente que lo presente.

@@ -58,7 +58,11 @@ export const DOCUMENT_LIST_SELECT = {
   receptor: { select: { id: true, nombre: true, nit: true, ...PARTY_DEFAULTS_SELECT } },
 } satisfies Prisma.PurchaseDocumentSelect;
 
-/** Export: solo lo que consume `buildAnexoRow`, más los defaults del receptor. */
+/**
+ * Export: solo lo que consume `buildAnexoRow`, más los defaults del receptor y
+ * el NIT del receptor, que no va en ninguna columna del anexo pero nombra el
+ * archivo (el Anexo 3 se presenta por contribuyente).
+ */
 export const DOCUMENT_EXPORT_SELECT = {
   id: true,
   fecEmi: true,
@@ -66,6 +70,7 @@ export const DOCUMENT_EXPORT_SELECT = {
   codigoGeneracion: true,
   emisorNit: true,
   emisorNombre: true,
+  receptorNit: true,
   totalExenta: true,
   totalNoSuj: true,
   totalGravada: true,

@@ -10,6 +10,9 @@ import { ExportPurchaseBookDto } from '../dto/export-purchase-book.dto';
 
 const TENANT_ID = '11111111-1111-1111-1111-111111111111';
 const MAX_ROWS = 20_000;
+const RECEPTOR_ID = '22222222-2222-2222-2222-222222222222';
+const OTRO_RECEPTOR_ID = '33333333-3333-3333-3333-333333333333';
+const RECEPTOR_NIT = '06140203901028';
 
 const d = (value: string | number): Prisma.Decimal => new Prisma.Decimal(value);
 
@@ -34,6 +37,7 @@ function exportRow(overrides: Record<string, unknown> = {}) {
     codigoGeneracion: '0B4E2221-74CF-4550-A451-31BBFB5CC9FD',
     emisorNit: '027561310',
     emisorNombre: 'LUIS ANTONIO TURCIOS ALVAREZ',
+    receptorNit: RECEPTOR_NIT,
     totalExenta: d(0),
     totalNoSuj: d(0),
     totalGravada: d('144'),
@@ -58,17 +62,22 @@ function callWithTenantMock(_tenantId: string, fn: (tx: unknown) => unknown): un
 }
 
 const prismaMock = {
-  purchaseDocument: { count: jest.fn(), findMany: jest.fn() },
+  purchaseDocument: { count: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
   withTenant: jest.fn(callWithTenantMock),
 };
 
 const configMock = { purchaseBookExportMaxRows: MAX_ROWS };
 const loggerMock = { setContext: jest.fn(), warn: jest.fn(), info: jest.fn() };
 
+/**
+ * `receptorId` es obligatorio en el export: el Anexo 3 se presenta por
+ * contribuyente, así que ningún caso de prueba representa un filtro válido sin
+ * receptor.
+ */
 function exportDto(overrides: Partial<ExportPurchaseBookDto> = {}): ExportPurchaseBookDto {
   return Object.assign(
     new ExportPurchaseBookDto(),
-    { format: 'csv', page: 1, limit: 50 },
+    { format: 'csv', receptorId: RECEPTOR_ID, page: 1, limit: 50 },
     overrides,
   );
 }
@@ -87,6 +96,8 @@ describe('ExportPurchaseBookService', () => {
     jest.clearAllMocks();
     prismaMock.withTenant.mockImplementation(callWithTenantMock);
     prismaMock.purchaseDocument.findMany.mockResolvedValue([exportRow()]);
+    // Un solo receptor: el caso sano de la guarda fiscal.
+    prismaMock.purchaseDocument.groupBy.mockResolvedValue([{ receptorId: RECEPTOR_ID }]);
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -138,6 +149,72 @@ describe('ExportPurchaseBookService', () => {
         ForbiddenException,
       );
     });
+
+    it('rechaza un export sin receptor sin tocar la base', async () => {
+      // El DTO ya lo exige, pero esa validación falló una vez en silencio por
+      // herencia de decoradores. El servicio no confía en ella para una
+      // condición de validez fiscal del archivo.
+      const sinReceptor = exportDto();
+      delete (sinReceptor as Partial<ExportPurchaseBookDto>).receptorId;
+
+      await expect(service.collectRows(adminCtx, sinReceptor)).rejects.toMatchObject({
+        status: 422,
+        response: { error: 'PURCHASE_BOOK_RECEPTOR_REQUIRED' },
+      });
+      expect(prismaMock.purchaseDocument.count).not.toHaveBeenCalled();
+      expect(prismaMock.purchaseDocument.groupBy).not.toHaveBeenCalled();
+      expect(prismaMock.purchaseDocument.findMany).not.toHaveBeenCalled();
+    });
+
+    /**
+     * Este caso NO es alcanzable por HTTP: `receptorId` es obligatorio y entra
+     * al `where` como igualdad, así que el `groupBy` solo puede devolver 0 o 1
+     * grupo. El escenario se fuerza con el mock a propósito, porque la guarda
+     * existe como red contra una regresión de `buildPurchaseDocumentWhere`, no
+     * como validación de un uso normal. Verifica la lógica de la rama en
+     * aislamiento: no detecta que alguien rompa el armado del `where`.
+     */
+    it('rechaza un conjunto que mezcla compras de más de un receptor', async () => {
+      mockCounts(2);
+      prismaMock.purchaseDocument.groupBy.mockResolvedValue([
+        { receptorId: RECEPTOR_ID },
+        { receptorId: OTRO_RECEPTOR_ID },
+      ]);
+
+      await expect(service.collectRows(adminCtx, exportDto())).rejects.toMatchObject({
+        status: 422,
+        response: { error: 'PURCHASE_BOOK_MULTIPLE_RECEPTORS' },
+      });
+      expect(prismaMock.purchaseDocument.findMany).not.toHaveBeenCalled();
+    });
+
+    it('la guarda de receptor no se adelanta al filtro vacío', async () => {
+      // Con el filtro vacío, el error accionable es PURCHASE_BOOK_EMPTY: la
+      // guarda de receptor nunca debe recorrer un conjunto sin acotar.
+      mockCounts(0);
+      prismaMock.purchaseDocument.groupBy.mockResolvedValue([
+        { receptorId: RECEPTOR_ID },
+        { receptorId: OTRO_RECEPTOR_ID },
+      ]);
+
+      await expect(service.collectRows(adminCtx, exportDto())).rejects.toMatchObject({
+        response: { error: 'PURCHASE_BOOK_EMPTY' },
+      });
+      expect(prismaMock.purchaseDocument.groupBy).not.toHaveBeenCalled();
+    });
+
+    it('la guarda de receptor no se adelanta al tope de filas', async () => {
+      mockCounts(MAX_ROWS + 1);
+      prismaMock.purchaseDocument.groupBy.mockResolvedValue([
+        { receptorId: RECEPTOR_ID },
+        { receptorId: OTRO_RECEPTOR_ID },
+      ]);
+
+      await expect(service.collectRows(adminCtx, exportDto())).rejects.toMatchObject({
+        response: { error: 'EXPORT_TOO_LARGE' },
+      });
+      expect(prismaMock.purchaseDocument.groupBy).not.toHaveBeenCalled();
+    });
   });
 
   describe('recolección de filas', () => {
@@ -151,6 +228,16 @@ describe('ExportPurchaseBookService', () => {
       // Columna O = suma de G a M = 144.00, sin el crédito fiscal de N.
       expect(rows[0][14].value).toBe('144.00');
       expect(rows[0][16].value).toBe('1');
+    });
+
+    it('devuelve el NIT del receptor tomado de los documentos', async () => {
+      mockCounts(1);
+
+      const { receptorNit } = await service.collectRows(adminCtx, exportDto());
+
+      expect(receptorNit).toBe(RECEPTOR_NIT);
+      // Sin consulta extra: el NIT sale de las filas que ya se recorren.
+      expect(prismaMock.purchaseDocument.findMany).toHaveBeenCalledTimes(1);
     });
 
     it('ordena por fecha de emisión ascendente', async () => {
@@ -232,20 +319,56 @@ describe('ExportPurchaseBookService', () => {
 
   describe('buildFileName', () => {
     it('usa el mes cuando el filtro es por período', () => {
-      expect(service.buildFileName(exportDto({ month: '2026-05' }), 'csv')).toBe(
-        'compras_2026-05.csv',
+      expect(service.buildFileName(exportDto({ month: '2026-05' }), 'csv', RECEPTOR_NIT)).toBe(
+        `compras_${RECEPTOR_NIT}_2026-05.csv`,
       );
     });
 
     it('usa la fecha inicial cuando el filtro es por rango', () => {
-      expect(service.buildFileName(exportDto({ from: '2026-05-01' }), 'xlsx')).toBe(
-        'compras_2026-05-01.xlsx',
+      expect(service.buildFileName(exportDto({ from: '2026-05-01' }), 'xlsx', RECEPTOR_NIT)).toBe(
+        `compras_${RECEPTOR_NIT}_2026-05-01.xlsx`,
       );
     });
 
+    it('incluye el NIT del receptor para distinguir el archivo de cada contribuyente', () => {
+      const dto = exportDto({ month: '2026-05' });
+
+      const unReceptor = service.buildFileName(dto, 'csv', RECEPTOR_NIT);
+      const otroReceptor = service.buildFileName(dto, 'csv', '12171609731022');
+
+      expect(unReceptor).toContain(RECEPTOR_NIT);
+      expect(unReceptor).not.toBe(otroReceptor);
+    });
+
     it('el nombre no contiene separadores de ruta', () => {
-      const name = service.buildFileName(exportDto({ month: '2026-05' }), 'csv');
+      const name = service.buildFileName(
+        exportDto({ month: '2026-05' }),
+        'csv',
+        '../../etc/passwd',
+      );
       expect(name).not.toMatch(/[/\\]/);
+    });
+
+    /**
+     * El NIT viene del JSON del DTE, o sea de quien envía el correo, y el parser
+     * solo exige que no esté vacío. Un punto de código sobre U+00FF hace que
+     * `res.setHeader` lance `ERR_INVALID_CHAR`, y como el NIT queda persistido
+     * el export de ese receptor devolvería 500 para siempre.
+     */
+    it('descarta del nombre cualquier carácter que rompa un header HTTP', () => {
+      const name = service.buildFileName(exportDto({ month: '2026-05' }), 'csv', '0614🎉020390');
+
+      expect(name).toBe('compras_0614020390_2026-05.csv');
+      // Latin-1 es el límite de lo que Node acepta en el valor de un header.
+      expect([...name].every((char) => char.charCodeAt(0) <= 0xff)).toBe(true);
+    });
+
+    it('cae en un marcador cuando el NIT no deja nada utilizable', () => {
+      const name = service.buildFileName(exportDto({ month: '2026-05' }), 'csv', '🎉');
+
+      // Degrada el nombre en vez de fallar: la validez fiscal del archivo no
+      // depende de cómo se llame.
+      expect(name).toBe('compras_sin-nit_2026-05.csv');
     });
   });
 });

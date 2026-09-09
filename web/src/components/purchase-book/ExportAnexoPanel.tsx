@@ -11,6 +11,8 @@ interface ExportAnexoPanelProps {
   /** Query ya construida con los filtros activos, sin `page` ni `limit`. */
   filtersQuery: string;
   summary: PurchaseBookSummary | null;
+  /** `true` cuando el filtro tiene un receptor concreto, no "todos". */
+  receptorSelected: boolean;
 }
 
 type Format = 'csv' | 'xlsx';
@@ -22,14 +24,21 @@ type Format = 'csv' | 'xlsx';
  * lo que se va a Hacienda. El checkbox de compras sin clasificar aparece solo
  * cuando hace falta, para no ofrecer de entrada un atajo que genera un archivo
  * incompleto.
+ *
+ * Sin un receptor elegido no hay export posible: el Anexo 3 se presenta por
+ * contribuyente y un archivo con varios receptores declararía compras ajenas.
  */
-export function ExportAnexoPanel({ filtersQuery, summary }: ExportAnexoPanelProps) {
+export function ExportAnexoPanel({
+  filtersQuery,
+  summary,
+  receptorSelected,
+}: ExportAnexoPanelProps) {
   const [downloading, setDownloading] = useState<Format | null>(null);
   const [allowUnclassified, setAllowUnclassified] = useState(false);
 
   const total = summary?.documentCount ?? 0;
   const unclassified = summary?.unclassifiedCount ?? 0;
-  const disabled = total === 0;
+  const disabled = !receptorSelected || total === 0;
 
   async function handleExport(format: Format) {
     setDownloading(format);
@@ -65,9 +74,11 @@ export function ExportAnexoPanel({ filtersQuery, summary }: ExportAnexoPanelProp
       <div className="flex flex-col gap-1">
         <h2 className="text-sm font-medium">Anexo 3 — Detalle de compras</h2>
         <p className="text-xs text-muted-foreground">
-          {disabled
-            ? 'El filtro actual no incluye compras para exportar.'
-            : `Se exportarán ${total} ${total === 1 ? 'compra' : 'compras'} del filtro activo.`}
+          {!receptorSelected
+            ? 'Elegí un receptor para exportar. El Anexo 3 se presenta por contribuyente: un archivo con varios receptores declararía compras de otra empresa.'
+            : total === 0
+              ? 'El filtro actual no incluye compras para exportar.'
+              : `Se exportarán ${total} ${total === 1 ? 'compra' : 'compras'} del filtro activo.`}
         </p>
       </div>
 

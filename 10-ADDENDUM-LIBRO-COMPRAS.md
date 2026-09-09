@@ -661,7 +661,7 @@ con mensaje en español; `Decimal` serializa como string; `fecEmi` como ISO a me
 | GET | `/parties` | MIEMBRO, ADMIN | `role: EMISOR \| RECEPTOR` obligatorio, `q?` (nombre/nit), `limit` ≤ 500, orden `nombre`. Incluye `documentCount`. |
 | PATCH | `/parties/:id/defaults` | ADMIN | `UpdatePartyDefaultsDto`: los 4 defaults (`Int \| null`). Valida propiedad; no exige `seenAsReceptor`. |
 | GET | `/catalogs` | MIEMBRO, ADMIN | Const maps con etiquetas en español (ADR-10.4). |
-| GET | `/export` | MIEMBRO, ADMIN | Filtros de listado + `format: csv \| xlsx`, `header?` (solo xlsx), `allowUnclassified?`. `@Throttle` 10/min. Ver §8. |
+| GET | `/export` | MIEMBRO, ADMIN | Filtros de listado + `receptorId` **obligatorio** (el Anexo 3 se presenta por contribuyente) + `format: csv \| xlsx`, `header?` (solo xlsx), `allowUnclassified?`. `@Throttle` 10/min. Ver §8. |
 | POST | `/reprocess` | ADMIN | Ver §6.6. `@Throttle` 5/min. |
 | GET | `/parse-results` | ADMIN | Ledger paginado con `status?`, `accountId?`, `from?/to?` (`parsedAt`). Vista operativa de fallos con `errorDetail`, `attachmentId`, `emailId`. |
 
@@ -678,6 +678,18 @@ exportada (patrón `buildExportWhere`).
 
 ### 8.1 Común a ambos formatos
 
+- **`receptorId` es obligatorio** (a diferencia del listado, donde es opcional). El Anexo 3 se
+  presenta **por contribuyente**: un archivo con varios receptores declararía las compras de
+  otra empresa dentro de la declaración propia, y un mismo buzón recibe DTE a favor de varios
+  clientes. Si falta el parámetro, el `ValidationPipe` global responde `400` con
+  `"receptorId debe ser un UUID válido"`.
+- `receptorId` se declara **por separado en cada DTO** —opcional en
+  `ListPurchaseDocumentsDto`, obligatorio en `ExportPurchaseBookDto`— sobre la base común
+  `PurchaseDocumentFiltersDto`, que lo expone sin decorador de validación. La razón es que
+  class-validator **no permite cancelar un `@IsOptional()` heredado**: lo registra como
+  metadato condicional de la propiedad y lo sigue aplicando en la subclase, así que un
+  `@IsOptional()` en la base dejaría inerte, en silencio, el `@IsUUID()` obligatorio del
+  export. `src/purchase-book/dto/export-purchase-book.dto.spec.ts` fija esa frontera.
 - `buildAnexoRow(doc, receptor): AnexoCell[]` en `src/purchase-book/anexo/build-anexo-row.ts`
   es el **único** lugar con el mapeo de 21 columnas. Devuelve celdas tipadas
   `{ kind: 'text' | 'amount' | 'int'; value: string }` que renderizan los adaptadores CSV y XLSX.
@@ -692,11 +704,30 @@ exportada (patrón `buildExportWhere`).
   `montoTotalOperacion`, que es la reconciliación real contra el DTE.
 - `ExportPurchaseBookService.streamRows(ctx, dto, sink)`: cursor `fecEmi asc, id asc` en
   lotes de 500 con `select` mínimo + `receptor.default*`. **Nunca** `findMany` sin `take`.
-- Antes de emitir headers: `count > PURCHASE_BOOK_EXPORT_MAX_ROWS` → `422 EXPORT_TOO_LARGE`;
+- Antes de emitir headers, en este orden: `!dto.receptorId` →
+  `422 PURCHASE_BOOK_RECEPTOR_REQUIRED`
+  (`"El Anexo 3 se presenta por contribuyente: hay que elegir un receptor antes de exportar."`),
+  defensa en profundidad del servicio sobre la validación del DTO, que ya respondió `400`;
+  `count === 0` → `422 PURCHASE_BOOK_EMPTY`;
+  `count > PURCHASE_BOOK_EXPORT_MAX_ROWS` → `422 EXPORT_TOO_LARGE`;
   `unclassifiedCount > 0 && !allowUnclassified` → `422 PURCHASE_BOOK_UNCLASSIFIED`
-  (`"Hay N compras sin clasificar (columnas Q–T). Clasifíquelas o exporte con allowUnclassified=true."`).
-- Nombre: `sanitizeFilename(\`compras_${receptorNit ?? 'todos'}_${periodo}.${ext}\`)`,
+  (`"Hay N compras sin clasificar (columnas Q–T). Clasifíquelas o exporte con allowUnclassified=true."`);
+  `groupBy(['receptorId'])` con más de un grupo → `422 PURCHASE_BOOK_MULTIPLE_RECEPTORS`
+  (`"El filtro incluye compras de N receptores. El Anexo 3 se presenta por contribuyente: el export tiene que abarcar un solo receptor."`).
+  La guarda de receptores va última porque `buildPurchaseDocumentWhere` ya filtra por
+  `receptorId`: es una red de seguridad contra una regresión del armado del `where`, cuya falla
+  es silenciosa y fiscal, y se ejecuta solo sobre un conjunto ya acotado por las guardas previas.
+- Nombre: `sanitizeFilename(\`compras_${receptorNit}_${periodo}.${ext}\`)` — por ejemplo
+  `compras_06140203901028_2026-05.csv`, con `periodo = month ?? from ?? hoy`. El NIT del receptor
+  va en el nombre porque un mismo operador exporta el anexo de varios contribuyentes y dos
+  archivos del mismo período serían indistinguibles.
   `Content-Disposition: attachment; filename="..."` (componentes ASCII).
+  El NIT se acota a `[A-Za-z0-9]` antes de entrar al nombre, con fallback `sin-nit`. **No es
+  cosmético:** el NIT llega del JSON del DTE (o sea de quien envía el correo) y el parser solo
+  exige que no venga vacío; `sanitizeFilename` deja pasar puntos de código sobre U+00FF y
+  `res.setHeader` lanza `ERR_INVALID_CHAR` con esos valores. Como el NIT queda persistido, un
+  único DTE con un carácter así dejaría el export de ese receptor devolviendo 500 de forma
+  permanente. Cubierto por unit test.
 - Error después de headers → `res.destroy(err)` (mismo patrón que el ZIP).
 
 ### 8.2 CSV — `src/purchase-book/export/anexo-csv.ts`
@@ -760,7 +791,10 @@ Orden vertical: encabezado → `FiltersPanel` → `SummaryStrip` → `ExportAnex
 - **`ExportAnexoPanel`**: muestra el conteo del summary, botones "CSV (;)" y "XLSX" que
   llaman `apiDownload('/purchase-book/export?...')` con los filtros activos; checkbox
   "Exportar aunque haya compras sin clasificar" visible solo si `unclassifiedCount > 0`;
-  toasts para `PURCHASE_BOOK_UNCLASSIFIED` y `EXPORT_TOO_LARGE`.
+  toasts para `PURCHASE_BOOK_UNCLASSIFIED` y `EXPORT_TOO_LARGE`. Con "Todos los receptores"
+  seleccionado (`receptorSelected === false`) los dos botones quedan deshabilitados y el panel
+  explica por qué: el Anexo 3 se presenta por contribuyente. Ese mensaje tiene precedencia
+  sobre el de filtro vacío, porque es el accionable.
 - **`ReprocessButton`** (solo ADMIN, `useAuthStore`): `AlertDialog` con selector de modo
   (faltantes / fallidos / todos) y explicación; itera `POST /reprocess` hasta
   `nextCursor === null`; toast con el total encolado.
@@ -896,6 +930,10 @@ llamando a `DteIngestService.ingestAttachment` directamente (camino del worker s
 - MIEMBRO `PATCH classification` → 403; ADMIN → 200 y el export refleja el override.
 - SUPERADMIN → 403 `FORBIDDEN_ROLE`.
 - Bytes del CSV: sin BOM, `\r\n`, 21 celdas por fila, E/P correctos.
+- Export sin `receptorId` → 400 del `ValidationPipe`.
+- Export con `receptorId` → 200 y el archivo emitido contiene **un solo contribuyente**: se
+  mapea la columna D de cada fila contra la base y el conjunto de `receptorId` distintos mide 1.
+- Nombre del archivo con el NIT del receptor (`compras_{nit}_{periodo}.{ext}`).
 - Export con pendientes → 422; con `allowUnclassified=true` → 200.
 - `reprocess mode=missing` → `enqueued: 0` tras la ingesta.
 - Mismo DTE en una segunda cuenta del tenant A → `DUPLICADO`, total del listado sin cambio.
@@ -1095,6 +1133,15 @@ Estimación total: 6–7 días.
 5. **Una excepción a la regla de `Decimal`**, en `toXlsxCell`: una celda numérica de XLSX
    tiene que ser un `number`. Está acotada al último paso y documentada en el código y en la
    regla 27 de `CLAUDE.md`.
+6. **`receptorId` obligatorio en el export.** El plan heredaba los filtros del listado tal
+   cual, así que `receptorId` quedó opcional también en el export y "Todos los receptores"
+   generaba un archivo con las compras de varios contribuyentes. El Anexo 3 se presenta por
+   contribuyente: ese archivo declara compras ajenas dentro de la declaración propia. La falla
+   era silenciosa porque los tests verificaban el formato de las 21 columnas y nunca la
+   validez fiscal del conjunto exportado. Corregido con `receptorId` obligatorio en el DTO,
+   guarda `PURCHASE_BOOK_MULTIPLE_RECEPTORS` en `collectRows`, NIT del receptor en el nombre
+   del archivo, botones deshabilitados en el panel sin receptor elegido y regla 31 de
+   `CLAUDE.md`.
 
 **Totales de la característica:** 78 archivos, ~12 000 líneas. 405 tests unitarios y 89 e2e
 en verde.

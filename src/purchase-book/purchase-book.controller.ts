@@ -58,10 +58,10 @@ export class PurchaseBookController {
     @CurrentTenant() ctx: TenantContext,
     @Res() res: Response,
   ): Promise<void> {
-    const { rows } = await this.exportService.collectRows(ctx, dto);
+    const { rows, receptorNit } = await this.exportService.collectRows(ctx, dto);
 
     if (dto.format === 'csv') {
-      const fileName = this.exportService.buildFileName(dto, 'csv');
+      const fileName = this.exportService.buildFileName(dto, 'csv', receptorNit);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
@@ -77,7 +77,7 @@ export class PurchaseBookController {
       return;
     }
 
-    const fileName = this.exportService.buildFileName(dto, 'xlsx');
+    const fileName = this.exportService.buildFileName(dto, 'xlsx', receptorNit);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

@@ -9,6 +9,7 @@ import { DteEnqueuer } from './queue/dte-enqueuer';
 import { PARSER_VERSION } from './parser/dte-parser';
 import { ANEXO_CLASSIFICATION_EPOCH } from './anexo/resolve-classification';
 import { ListPurchaseDocumentsDto } from './dto/list-purchase-documents.dto';
+import { PurchaseDocumentFiltersDto } from './dto/purchase-document-filters.dto';
 import { UpdateClassificationDto } from './dto/update-classification.dto';
 import { ReprocessDto } from './dto/reprocess.dto';
 import { ListParseResultsDto } from './dto/list-parse-results.dto';
@@ -52,10 +53,13 @@ const ZERO = '0';
  * `tenantId` es siempre el primer filtro aunque RLS ya aísle: defensa en
  * profundidad, y además permite que el planner use los índices compuestos
  * `[tenantId, fecEmi]`, `[tenantId, receptorId, fecEmi]`, etc.
+ *
+ * Recibe la base `PurchaseDocumentFiltersDto` para servir tanto al listado como
+ * al export, que declaran `receptorId` por separado.
  */
 export function buildPurchaseDocumentWhere(
   tenantId: string,
-  dto: ListPurchaseDocumentsDto,
+  dto: PurchaseDocumentFiltersDto,
 ): Prisma.PurchaseDocumentWhereInput {
   const where: Prisma.PurchaseDocumentWhereInput = { tenantId };
 
@@ -123,7 +127,7 @@ function unclassifiedConditions(): Prisma.PurchaseDocumentWhereInput[] {
 }
 
 function classificationFilter(
-  value: ListPurchaseDocumentsDto['classification'],
+  value: PurchaseDocumentFiltersDto['classification'],
 ): Prisma.PurchaseDocumentWhereInput[] | null {
   if (!value || value === 'all') return null;
 

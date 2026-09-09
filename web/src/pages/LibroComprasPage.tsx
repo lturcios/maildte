@@ -424,7 +424,11 @@ export function LibroComprasPage() {
         }
       />
 
-      <ExportAnexoPanel filtersQuery={filtersQuery} summary={summary} />
+      <ExportAnexoPanel
+        filtersQuery={filtersQuery}
+        summary={summary}
+        receptorSelected={filters.receptorId !== ALL}
+      />
 
       {/* Tabla en md+; cards en viewports chicos. */}
       <div className="hidden md:block">
