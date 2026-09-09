@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 
 import { apiGet, apiPost, ApiError } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
+import { startSession } from '@/stores/session';
 import type { AuthTokens, AuthUser } from '@/types/auth';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,7 +21,6 @@ interface AuthUserResponse {
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const setTokens = useAuthStore((state) => state.setTokens);
   const setUser = useAuthStore((state) => state.setUser);
 
   const [email, setEmail] = useState('');
@@ -37,7 +37,9 @@ export function LoginPage() {
         { email, password },
         true,
       );
-      setTokens(loginResponse.data);
+      // `startSession` vacía los stores del tenant antes de guardar los tokens:
+      // la pestaña puede venir de una sesión anterior sin haber recargado.
+      startSession(loginResponse.data);
 
       const meResponse = await apiGet<AuthUserResponse>('/me');
       setUser(meResponse.data);

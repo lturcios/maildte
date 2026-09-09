@@ -16,6 +16,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { apiPost } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
+import { endSession } from '@/stores/session';
 import { useUiStore } from '@/stores/ui-store';
 import { cn } from '@/lib/utils';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -113,7 +114,6 @@ export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const user = useAuthStore((state) => state.user);
-  const logout = useAuthStore((state) => state.logout);
   const theme = useUiStore((state) => state.theme);
   const toggleTheme = useUiStore((state) => state.toggleTheme);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -139,7 +139,9 @@ export function AppLayout() {
     } catch {
       // El logout local debe completarse igual aunque falle la llamada HTTP.
     } finally {
-      logout();
+      // Cierra credenciales y vacía los stores del tenant: sin lo segundo, un
+      // login posterior en la misma pestaña reusa el caché de esta sesión.
+      endSession();
       setIsLoggingOut(false);
       navigate('/login', { replace: true });
     }
