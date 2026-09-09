@@ -48,7 +48,7 @@
     "imapflow": "^1.0.171",
     "ioredis": "^5.4.1",
     "joi": "^17.13.3",
-    "mailparser": "^3.7.2",
+    "mailparser": "^3.9.23",
     "nestjs-pino": "^4.3.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
