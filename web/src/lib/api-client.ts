@@ -1,4 +1,5 @@
 import { useAuthStore } from '@/stores/auth-store';
+import { endSession } from '@/stores/session';
 import type { AuthTokens } from '@/types/auth';
 
 /**
@@ -139,7 +140,10 @@ async function fetchWithAuth(options: RequestOptions): Promise<Response> {
     try {
       await refreshAccessToken();
     } catch {
-      useAuthStore.getState().logout();
+      // `redirectToLogin()` hace una navegación dura y con eso se pierde todo
+      // el estado en memoria, pero el cierre no puede depender de ese efecto
+      // lateral: se vacían los stores del tenant explícitamente.
+      endSession();
       redirectToLogin();
       throw new ApiError({
         statusCode: 401,

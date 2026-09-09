@@ -6,8 +6,16 @@ interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   user: AuthUser | null;
-  login: (tokens: AuthTokens, user: AuthUser) => void;
+  /**
+   * Solo credenciales: no vacía los stores de datos del tenant. Las vistas y el
+   * cliente HTTP deben usar `endSession()` de src/stores/session.ts, que hace
+   * las dos cosas. Llamarlo suelto deja el caché del tenant anterior en memoria.
+   */
   logout: () => void;
+  /**
+   * Rota los tokens dentro de la MISMA sesión (refresh en 401). Para abrir una
+   * sesión nueva se usa `startSession()` de src/stores/session.ts.
+   */
   setTokens: (tokens: AuthTokens) => void;
   setUser: (user: AuthUser) => void;
 }
@@ -18,12 +26,6 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       refreshToken: null,
       user: null,
-      login: (tokens, user) =>
-        set({
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          user,
-        }),
       logout: () => set({ accessToken: null, refreshToken: null, user: null }),
       setTokens: (tokens) =>
         set({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken }),
