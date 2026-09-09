@@ -32,5 +32,7 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  /* Los tests viven en su propio proyecto (tsconfig.test.json). */
+  "exclude": ["src/test", "src/**/*.spec.ts", "src/**/*.spec.tsx"]
 }
