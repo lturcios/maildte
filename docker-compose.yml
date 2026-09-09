@@ -19,6 +19,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Desarrollo local sin contraseña, a diferencia de producción, donde
+    # `docker-compose.prod.yml` arranca Redis con `--requirepass` y aborta el
+    # `up` si falta REDIS_PASSWORD. Acá no la pedimos porque este compose no
+    # sale de la máquina del desarrollador y exigirla obligaría a actualizar el
+    # `.env` y el `REDIS_URL` de `test/set-test-env.ts` de todo el equipo.
+    # No copiar este `REDIS_URL` (`redis://localhost:6379`) a un `.env` de
+    # producción: allá la forma correcta es `redis://:CLAVE@redis:6379`.
     ports:
       - '6379:6379'
     volumes:

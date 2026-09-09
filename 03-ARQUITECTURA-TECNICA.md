@@ -330,7 +330,8 @@ STORAGE_ROOT (env, default /data/storage)
 NODE_ENV=production
 PORT=3000
 DATABASE_URL=postgresql://maildte:secret@postgres:5432/maildte
-REDIS_URL=redis://redis:6379
+REDIS_PASSWORD=            # openssl rand -hex 32; la exige docker-compose.prod.yml
+REDIS_URL=redis://:<REDIS_PASSWORD>@redis:6379
 ENCRYPTION_KEY=            # 32 bytes hex (openssl rand -hex 32)
 API_KEY=                   # openssl rand -hex 24
 STORAGE_ROOT=/data/storage
@@ -365,6 +366,10 @@ services:
     volumes: ["pgdata:/var/lib/postgresql/data"]
   redis:
     image: redis:7-alpine
+    # Autenticación obligatoria en producción. El esqueleto de acá está
+    # simplificado: la versión real, con healthcheck autenticado y la variable
+    # marcada como obligatoria, está en docker-compose.prod.yml.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     volumes: ["redisdata:/data"]
 volumes:
   storage:
