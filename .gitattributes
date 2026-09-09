@@ -1,0 +1,34 @@
+# Finales de línea: LF en el repositorio y LF en el árbol de trabajo, en todas
+# las plataformas.
+#
+# Sin esto, el instalador de Git para Windows deja `core.autocrlf=true` en la
+# configuración del sistema, y cada `git checkout` reescribe con CRLF los
+# archivos que difieren entre ramas. Prettier exige LF (su `endOfLine` por
+# defecto), así que `pnpm lint` y `pnpm --dir web lint` empezaban a fallar con
+# cientos de errores `Delete ␍` después de cada cambio de rama, sin que nadie
+# hubiera tocado el código.
+#
+# Los blobs del repositorio ya estaban en LF, así que esta regla no renormaliza
+# contenido: solo fija cómo se escriben los archivos al hacer checkout.
+* text=auto eol=lf
+
+# Binarios: sin conversión ni diff de texto.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.zip binary
+*.xlsx binary
+
+# Lockfiles: se generan, no se revisan a mano. Se marcan como generados para que
+# GitHub los colapse en el diff del PR, pero se deja el diff textual disponible:
+# `-diff` los volveria binarios para git y complicaria resolver un conflicto.
+pnpm-lock.yaml linguist-generated=true

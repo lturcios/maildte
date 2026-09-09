@@ -47,8 +47,8 @@
     "class-validator": "^0.14.1",
     "imapflow": "^1.0.171",
     "ioredis": "^5.4.1",
-    "joi": "^17.13.3",
-    "mailparser": "^3.7.2",
+    "joi": "^17.13.7",
+    "mailparser": "^3.9.23",
     "nestjs-pino": "^4.3.0",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
@@ -114,6 +114,11 @@
       "argon2",
       "msgpackr-extract",
       "prisma"
-    ]
+    ],
+    "overrides": {
+      "qs": "^6.16.0",
+      "body-parser": "^1.20.8",
+      "lodash": "^4.18.1"
+    }
   }
 }
