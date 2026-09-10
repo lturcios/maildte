@@ -2,7 +2,8 @@
 
 **Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2
 **cerrada**: puntos 5, 2, 3 y 1 implementados, el punto 4 diferido con condición de disparo. Fase 3
-**bloqueada** por la §7.4. Fase 4 sin empezar.
+**desbloqueada** con la §7.4 cerrada, pendiente de rehacer sus puntos 1, 2 y 4 sobre la fuente nueva.
+Fase 4 sin empezar.
 **Origen:** dos hallazgos en el primer despliegue del Addendum 10 en producción (2026-09-09).
 **Depende de:** Addendum 10 (libro de compras), ya en `main`.
 
@@ -351,8 +352,11 @@ proveedor.
 
 **Qué sobrevive de la fase.** La necesidad es real — el cliente opera varias unidades de negocio y
 necesita segmentar sus compras. Lo que no sirve es la fuente del dato. La decisión de qué fuente
-usar queda **abierta** (§7.4); hasta cerrarla, los puntos 1, 2 y 4 no se implementan. El punto 3
-(rótulo del export parcial) es independiente de la fuente y se mantiene tal cual.
+usar se cerró en la **§7.4 (2026-09-10)**: `override del documento > default por (proveedor,
+receptor) > sin clasificar`. Los puntos 1, 2 y 4 quedan desbloqueados, pero **hay que rehacerlos sobre
+esa fuente**: no es cambiar de dónde se lee un código, es que la actividad pasa a ser un dato que el
+contribuyente declara y el sistema hereda, no un dato que viene en el DTE. El punto 3 (rótulo del
+export parcial) es independiente de la fuente y se mantiene tal cual.
 
 El campo capturado en la fase 1 **no se descarta**: es la evidencia que permitió detectar esto, sirve
 para control de calidad de lo que declaran los proveedores, y es un candidato razonable a *sugerencia*
@@ -539,19 +543,48 @@ SELECT count(*) FROM purchase_documents WHERE "receptorId" = '<id de la canónic
 
 2. **Criterio de fusión de los defaults Q–T** cuando las dos partes traen clasificaciones
    distintas: ¿gana la de más documentos, o se deja sin clasificar y que el contador decida?
-4. **Fuente de la segmentación por actividad — ABIERTA, bloquea la fase 3.** El campo del DTE no
-   sirve (ver la revisión de la fase 3). Las alternativas, sin decidir:
-   - **Clasificación explícita por documento**, con la misma mecánica de los overrides Q–T
-     (`override del documento > default > sin clasificar`) y la clasificación masiva de la fase 4
-     como herramienta para que sea viable sobre cientos de compras. Es la única fuente que responde
-     de verdad "a qué actividad corresponde esta compra", porque la contesta quien lo sabe. Cuesta
-     trabajo del contador.
-   - **Derivar del proveedor**: cada proveedor suele servir a una sola unidad de negocio. Barato y
-     probablemente correcto en la mayoría de los casos, silenciosamente incorrecto en el resto.
-   - **El código del DTE como sugerencia** de cualquiera de las dos anteriores, nunca como criterio.
+4. **Fuente de la segmentación por actividad — CERRADA (2026-09-10): default por proveedor y
+   receptor, con override por documento.**
 
-   La decisión no es técnica: define cuánto trabajo manual acepta el contador a cambio de cuánta
-   exactitud. Hay que preguntarla antes de diseñar la fase 3.
+   ```
+   actividad de la compra = override del documento
+                          > default por (proveedor, receptor)
+                          > sin clasificar
+   ```
+
+   `receptorCodActividad` —el código que viene en el DTE— se muestra **como dato informativo**:
+   sirve para prellenar el mapeo y para ver qué declaran los proveedores. No decide nunca. Por qué
+   no puede decidir, con la evidencia, en la revisión de la fase 3.
+
+   **El número que la decidió.** El contribuyente con varias unidades de negocio tiene **30
+   proveedores distintos para 864 compras**: 28,8 compras por proveedor. La tabla de mapeo son 30
+   filas y cubre el histórico completo, más todo lo que venga de esos mismos proveedores — que en un
+   restaurante son casi todas. Con 200 proveedores la decisión habría sido la inversa: ahí la tabla
+   de mapeo es otra tarea que nadie termina y habría que apoyarse en la clasificación masiva de la
+   fase 4 sobre filtros anchos.
+
+   **Por qué las dos capas y no una sola.** Las alternativas que se evaluaron no eran excluyentes, y
+   ahí estaba la salida:
+
+   | Fuente | Sola | En capas |
+   |---|---|---|
+   | Clasificación explícita por documento | Responde la pregunta correcta, pero son 864 decisiones: una tarea que nadie termina, y una funcionalidad que nadie usa es una funcionalidad que no existe. | Es la capa de **override**: corrige el 10% donde el default se equivoca. |
+   | Default por proveedor | 30 decisiones, correcto en la mayoría — y **silenciosamente incorrecto en el resto**: un distribuidor de alimentos que le vende al restaurante *y* a la panadería queda mal clasificado sin que nada avise. | Es la capa de **default**: entrega el 90% sin trabajo manual. |
+
+   Sin el default, la clasificación explícita no se hace. Sin el override, el default miente. Juntas
+   se sostienen, y además es **la misma precedencia de las columnas Q–T**: no hay mecánica nueva que
+   aprender ni diseñar, ni para el contador ni para el código (`resolveClassification()`).
+
+   **El default es por (proveedor, receptor), no por proveedor.** El mismo distribuidor le vende a
+   varios clientes del mismo buzón, y a qué unidad de negocio va cada compra es asunto de cada
+   receptor. Un default colgado del `DteParty` del emisor sería global al tenant y mezclaría
+   criterios entre contribuyentes: es el mismo error de forma que un export mezclando receptores
+   (§31 de `CLAUDE.md`), con la misma consecuencia — una decisión de un contribuyente aplicándose a
+   las compras de otro.
+
+   **Nota para la UI, no para el modelo.** Conviene medir la cola de esos 30 proveedores antes de
+   armar la pantalla de mapeo: si uno concentra 400 compras y veinte tienen 3, mapear los cinco
+   primeros ya cubre el 80%. La lista se ordena **por volumen de compras**, no alfabéticamente.
 5. **Identidad del emisor.** Probablemente tiene el mismo problema, pero ahí no produce una
    declaración incorrecta: el anexo lleva el identificador del emisor tal cual y la regla E/P lo
    resuelve por longitud. Solo ensucia el listado de proveedores con filas repetidas. Fuera de
