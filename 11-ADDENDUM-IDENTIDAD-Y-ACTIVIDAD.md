@@ -45,6 +45,10 @@ declarado**: cambia qué filas entran al archivo, no qué dice cada fila.
 Una empresa con varias actividades quiere segmentar sus compras por actividad. Hoy ese dato **ya se
 está descartando** en cada ingesta: antes de exponerlo hay que dejar de perderlo.
 
+> **Leído con los datos de producción (2026-09-09):** dejar de perder el dato era correcto, pero el
+> dato **no responde la pregunta de la segmentación**. Lo escribe el emisor, no el receptor. Ver la
+> revisión obligatoria al inicio de la fase 3.
+
 **Implicación en la clasificación Q–T.** `resolveClassification()` resuelve hoy con la precedencia
 `override del documento > default del receptor > sin clasificar`. Si una empresa segmenta por
 actividad, sus defaults no son por receptor sino **por receptor y actividad**.
@@ -116,6 +120,31 @@ identificadores lo referencian sus proveedores. Implementada en el RUNBOOK §9.b
    que siempre dependió; `force` sigue gobernando solo el early-exit de `hasTerminalResult()`. Sin
    esto, subir `PARSER_VERSION` no repuebla nada y la fase 1 no tiene efecto sobre el histórico.
 
+#### Resultado del gate (producción, 2026-09-09)
+
+Desplegada la fase 1 y corrido el backfill en modo `failed`, la fase queda **cerrada**. Cuatro
+mediciones, y lo que cada una decide sobre lo que viene:
+
+| Medición | Resultado | Qué decide |
+|---|---|---|
+| Documentos con `parserVersion >= 2` | 862/862 (`wendy-cocar`), 1/1 (`rosa-alvarez`) | El histórico quedó reprocesado. |
+| Documentos con `receptorCodActividad` | **862/862** | El dato viene en el 100% de los DTE. Se estaba descartando en cada ingesta desde el primer día. |
+| Partes sin `canonicalKey` | **0** | La cascada NRC > NIT-14 > DUI-9 cubre toda la producción. La fase 2 no necesita un cuarto nivel ni revisión manual previa. |
+| Grupos con `partes > 1` | **1** | Una sola fusión pendiente, y es la del §1.1. El script de la §4 se estrena contra el caso más simple posible. |
+
+El contribuyente partido es el conocido: JOSE WALTER CRUZ MARAVILLA, NRC `1435153`, referenciado por
+sus proveedores como `11022205761034` y como `022560911`, con 862 documentos entre las dos partes.
+
+**El backfill hubo que correrlo dos veces, y la primera mintió.** Reportó 968 trabajos encolados y
+reprocesó 419 documentos de 862. Causa: el `jobId` es determinístico (`dte-<attachmentId>`) y
+`DteEnqueuer` usa `removeOnComplete: 500`, así que los 500 registros de job retenidos del backfill
+del Addendum 10 conservaban esos mismos ids — y **BullMQ ignora en silencio un `add` cuyo `jobId` ya
+existe**, devolviendo el job viejo, ya completado. `enqueueParseBulk` devuelve `targets.length` sin
+mirar lo que aceptó `addBulk`, así que el número del reporte no significaba nada. Se destrabó
+liberando los ids huérfanos en Redis y repitiendo el backfill (520 restantes). El arreglo de fondo va
+aparte, con su diagnóstico en el RUNBOOK §9: la firma de esta falla es **`llen bull:dte:wait` en 0 con
+`con_parser_2 < documentos`**, que no parece un error en ninguna parte.
+
 ### Fase 2 — Unificar la identidad
 
 1. Migración: `canonicalKey` calculada para las filas existentes, y `@@unique([tenantId,
@@ -133,6 +162,46 @@ identificadores lo referencian sus proveedores. Implementada en el RUNBOOK §9.b
 a las dos **o falla explícitamente**. Nunca que exporte una y omita la otra.
 
 ### Fase 3 — Segmentación por actividad
+
+#### REVISIÓN OBLIGATORIA antes de implementar (2026-09-09)
+
+Los datos de la fase 1 **invalidan la premisa de esta fase tal como está escrita.** Distribución
+real de `receptorCodActividad` en los 862 documentos del único contribuyente con más de una
+actividad:
+
+| Código | Descripción | Documentos | Proveedores distintos |
+|---|---|---|---|
+| `56101` | RESTAURANTES | 561 | **26** |
+| `56107` | Actividades varias de restaurantes | 290 | **2** |
+| `47219` | Venta al por menor de alimentos n.c.p. | 8 | 1 |
+| `10005` | Otros | 3 | 1 |
+
+No son cuatro actividades: es **una actividad con cuatro etiquetas**. La columna que lo delata es la
+de proveedores. Veintiséis proveedores coinciden en `56101`; los 290 documentos de `56107` —volumen
+suficiente para parecer legítimo— vienen de **dos** proveedores que sistemáticamente eligen otro
+código para el mismo restaurante; los otros dos códigos son un proveedor cada uno, y uno de ellos se
+llama literalmente "Otros".
+
+**La razón es conceptual, no un problema de calidad de datos.** `receptorCodActividad` lo escribe el
+**emisor**, copiándolo del registro de Hacienda al facturar. Responde "cómo está inscripto el
+comprador", no "a qué actividad del comprador corresponde esta compra". El proveedor no puede
+responder la segunda: no sabe a qué unidad de negocio va lo que vende. Un contribuyente con varias
+actividades inscritas recibe códigos distintos según cuál eligió cada emisor, y esa elección no
+guarda relación con el destino de la compra.
+
+Implementar el filtro sobre este campo partiría el libro de un solo restaurante en cuatro pedazos
+sin significado contable. El punto 4 (defaults Q–T por receptor+actividad) hereda el mismo vicio, y
+con más consecuencia: haría depender la clasificación del Anexo 3 de qué código eligió el
+proveedor.
+
+**Qué sobrevive de la fase.** La necesidad es real — el cliente opera varias unidades de negocio y
+necesita segmentar sus compras. Lo que no sirve es la fuente del dato. La decisión de qué fuente
+usar queda **abierta** (§7.4); hasta cerrarla, los puntos 1, 2 y 4 no se implementan. El punto 3
+(rótulo del export parcial) es independiente de la fuente y se mantiene tal cual.
+
+El campo capturado en la fase 1 **no se descarta**: es la evidencia que permitió detectar esto, sirve
+para control de calidad de lo que declaran los proveedores, y es un candidato razonable a *sugerencia*
+por defecto — nunca a criterio de segmentación.
 
 **Criterio contable confirmado por el usuario (2026-09-09):** se presenta **un solo libro de
 compras por contribuyente**, con independencia de la actividad económica a la que se atribuya cada
@@ -315,7 +384,20 @@ SELECT count(*) FROM purchase_documents WHERE "receptorId" = '<id de la canónic
 
 2. **Criterio de fusión de los defaults Q–T** cuando las dos partes traen clasificaciones
    distintas: ¿gana la de más documentos, o se deja sin clasificar y que el contador decida?
-3. **Identidad del emisor.** Probablemente tiene el mismo problema, pero ahí no produce una
+4. **Fuente de la segmentación por actividad — ABIERTA, bloquea la fase 3.** El campo del DTE no
+   sirve (ver la revisión de la fase 3). Las alternativas, sin decidir:
+   - **Clasificación explícita por documento**, con la misma mecánica de los overrides Q–T
+     (`override del documento > default > sin clasificar`) y la clasificación masiva de la fase 4
+     como herramienta para que sea viable sobre cientos de compras. Es la única fuente que responde
+     de verdad "a qué actividad corresponde esta compra", porque la contesta quien lo sabe. Cuesta
+     trabajo del contador.
+   - **Derivar del proveedor**: cada proveedor suele servir a una sola unidad de negocio. Barato y
+     probablemente correcto en la mayoría de los casos, silenciosamente incorrecto en el resto.
+   - **El código del DTE como sugerencia** de cualquiera de las dos anteriores, nunca como criterio.
+
+   La decisión no es técnica: define cuánto trabajo manual acepta el contador a cambio de cuánta
+   exactitud. Hay que preguntarla antes de diseñar la fase 3.
+5. **Identidad del emisor.** Probablemente tiene el mismo problema, pero ahí no produce una
    declaración incorrecta: el anexo lleva el identificador del emisor tal cual y la regla E/P lo
    resuelve por longitud. Solo ensucia el listado de proveedores con filas repetidas. Fuera de
    alcance, anotado.
