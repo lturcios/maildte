@@ -1153,6 +1153,133 @@ Estados y qué significan:
 
 Tras corregir la causa, `mode=failed` vuelve a intentar solo lo que falló.
 
+### El backfill reporta éxito y no reprocesa nada (ids de job retenidos en Redis)
+
+Este es el modo de falla más caro de esta cola, porque **no aparece como error en
+ninguna parte**: el script termina con código 0, reporta un número alto de
+trabajos encolados, la cola se vacía enseguida y la base no se movió. Verificado
+en producción el 2026-09-09: el backfill de la fase 1 del Addendum 11 informó
+**968 trabajos encolados y reprocesó 419 documentos de 862**.
+
+**La firma son dos lecturas juntas:**
+
+| Señal | Valor que delata la falla |
+|---|---|
+| `llen bull:dte:wait` | `0`, apenas terminado el script |
+| `con_parser_2` de la consulta de verificación del §9.b | **menor que `documentos`** |
+| Logs de la API y del worker | sin `error` y sin `"el lote se perdió"` |
+| Desglose de estados del ledger | sin `ERROR` nuevo |
+
+Es el "cuarto caso" del §2.c paso 7 (`llen` en 0 con trabajo sin hacer) pero con
+la búsqueda de `"el lote se perdió"` vacía: el lote no se perdió en el camino a
+Redis, Redis lo recibió y lo descartó.
+
+**La causa.** El `jobId` de la cola `dte` es determinístico (`dte-<attachmentId>`,
+para que dos encolados del mismo adjunto no dupliquen trabajo) y **BullMQ ignora
+en silencio un `add`/`addBulk` cuyo `jobId` ya existe**: devuelve el job que ya
+estaba, sin excepción y sin aviso. Con la retención vieja de completados
+(`removeOnComplete: 500`) los registros de job del backfill anterior seguían en
+Redis con esos mismos ids, así que el re-encolado de esos adjuntos no hacía nada.
+El colapso no duraba lo que tardaba el adjunto: duraba los siguientes 500 jobs
+completados de toda la instalación.
+
+**Solo hace falta en instalaciones desplegadas antes del arreglo de
+`DteEnqueuer`** — el que pasó a `removeOnComplete: true` (el registro durable del
+parseo es `dte_parse_results` en Postgres, no el historial de Redis) y agregó la
+liberación explícita del id previo en el camino de reprocesamiento. Desde ese
+despliegue no quedan ids de completados que estorben y esta sección es historia.
+
+#### Confirmar el diagnóstico
+
+```bash
+# 1. La cola está vacía
+docker compose -f docker-compose.prod.yml exec redis redis-cli llen bull:dte:wait
+
+# 2. Cuántos registros de job retenidos hay, y de qué estado.
+#    `completed` con miles de entradas y `dte-*` con la misma magnitud es la falla.
+docker compose -f docker-compose.prod.yml exec redis redis-cli zcard bull:dte:completed
+docker compose -f docker-compose.prod.yml exec redis redis-cli zcard bull:dte:failed
+docker compose -f docker-compose.prod.yml exec redis redis-cli --scan --pattern 'bull:dte:dte-*' | wc -l
+
+# 3. Que no haya un lote perdido, que es otra falla con otro procedimiento
+docker compose -f docker-compose.prod.yml logs api worker | jq -c 'select(.msg | test("el lote se perdió"))'
+```
+
+Cómo se leen juntas:
+
+| `llen ...:wait` | Claves `bull:dte:dte-*` | `"el lote se perdió"` | Qué es | Qué hacer |
+|---|---|---|---|---|
+| `0` | `> 0` con `zcard completed` alto | sin resultados | **Ids retenidos.** El re-encolado se absorbió contra los jobs viejos. | El `eval` de mantenimiento de abajo y repetir el backfill. |
+| `0` | `0` o unos pocos | **con resultados** | El lote nunca llegó a Redis (Redis caído, sin memoria o rechazando la escritura). | §9, "Si responde `503 PURCHASE_BOOK_QUEUE_UNAVAILABLE`". Nada que liberar. |
+| `> 0` | cualquiera | sin resultados | La cola tiene trabajo pendiente: no es esta falla. | §2.c paso 7: está drenando o el worker no consume. |
+
+#### Liberar los ids huérfanos
+
+Un solo `eval`, atómico. Lee los ids que todavía están pendientes (`wait`,
+`paused`, `active`, `delayed`, `failed`, `prioritized`), **los preserva**, borra
+el resto de las claves `bull:dte:dte-*` y vacía el zset `bull:dte:completed`.
+Devuelve cuántas claves liberó.
+
+Preservar `failed` es deliberado: esos registros son la evidencia de fallos de
+infraestructura que pueden no haber dejado fila en el ledger, y el reprocesamiento
+nuevo los libera uno por uno cuando le toca cada adjunto.
+
+```bash
+cat > /tmp/liberar-ids-dte.lua <<'LUA'
+local prefix = 'bull:dte:'
+local pendientes = {}
+
+for _, estado in ipairs({'wait', 'paused', 'active', 'delayed', 'failed', 'prioritized'}) do
+  local clave = prefix .. estado
+  local tipo = redis.call('TYPE', clave)['ok']
+  local ids = {}
+  if tipo == 'list' then
+    ids = redis.call('LRANGE', clave, 0, -1)
+  elseif tipo == 'zset' then
+    ids = redis.call('ZRANGE', clave, 0, -1)
+  end
+  for _, id in ipairs(ids) do
+    pendientes[id] = true
+  end
+end
+
+local liberadas = 0
+local cursor = '0'
+repeat
+  local res = redis.call('SCAN', cursor, 'MATCH', prefix .. 'dte-*', 'COUNT', 500)
+  cursor = res[1]
+  for _, clave in ipairs(res[2]) do
+    -- De 'bull:dte:dte-<uuid>:logs' el id es 'dte-<uuid>': las claves auxiliares
+    -- de un job pendiente tampoco se tocan.
+    local id = string.sub(clave, string.len(prefix) + 1)
+    local sep = string.find(id, ':', 1, true)
+    if sep then
+      id = string.sub(id, 1, sep - 1)
+    end
+    if not pendientes[id] then
+      redis.call('DEL', clave)
+      liberadas = liberadas + 1
+    end
+  end
+until cursor == '0'
+
+redis.call('DEL', prefix .. 'completed')
+return liberadas
+LUA
+
+docker compose -f docker-compose.prod.yml cp /tmp/liberar-ids-dte.lua redis:/tmp/liberar-ids-dte.lua
+docker compose -f docker-compose.prod.yml exec redis sh -c \
+  'redis-cli eval "$(cat /tmp/liberar-ids-dte.lua)" 0'
+# -> (integer) 500    claves de job liberadas
+```
+
+Es idempotente y seguro con el worker corriendo: los jobs en vuelo están en
+`active` y quedan intactos. Volver a correrlo devuelve `(integer) 0`.
+
+Después de liberar, repetir el backfill en el modo que corresponda (§9.b para la
+fase 1 del Addendum 11) y verificar con la consulta de conciliación: ahora
+`con_parser_2` tiene que llegar a `documentos`.
+
 ### 9.b Despliegue del Addendum 11, fase 1 (actividad del receptor y clave canónica)
 
 La fase 1 del Addendum 11 agrega tres columnas y **sube `PARSER_VERSION` de 1 a
