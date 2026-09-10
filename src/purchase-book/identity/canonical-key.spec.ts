@@ -1,4 +1,4 @@
-import { resolveCanonicalKey } from './canonical-key';
+import { resolveCanonicalKey, resolveCanonicalKeyWithSource } from './canonical-key';
 
 describe('resolveCanonicalKey', () => {
   describe('cascada', () => {
@@ -82,5 +82,59 @@ describe('resolveCanonicalKey', () => {
         resolveCanonicalKey({ nrc: null, nit: conDui9.nit }),
       );
     });
+  });
+});
+
+describe('resolveCanonicalKeyWithSource', () => {
+  describe('origen de cada rama de la cascada', () => {
+    it('informa `nrc` cuando la clave sale del NRC', () => {
+      expect(resolveCanonicalKeyWithSource({ nrc: '1435153', nit: '11022205761034' })).toEqual({
+        key: '1435153',
+        source: 'nrc',
+      });
+    });
+
+    it('informa `nit` cuando la clave sale del NIT de 14 dígitos', () => {
+      expect(resolveCanonicalKeyWithSource({ nrc: null, nit: '06140203901028' })).toEqual({
+        key: '06140203901028',
+        source: 'nit',
+      });
+    });
+
+    it('informa `dui` cuando la clave sale del identificador de 9 dígitos', () => {
+      expect(resolveCanonicalKeyWithSource({ nrc: null, nit: '022560911' })).toEqual({
+        key: '022560911',
+        source: 'dui',
+      });
+    });
+
+    it('devuelve null cuando ninguna rama aplica', () => {
+      expect(resolveCanonicalKeyWithSource({ nrc: null, nit: null })).toBeNull();
+      expect(resolveCanonicalKeyWithSource({ nrc: null, nit: '12345' })).toBeNull();
+    });
+
+    it('un NRC basura cae a la rama del identificador y lo informa', () => {
+      // La clave es la misma que devolvía la cascada; lo que cambia es que ahora
+      // se sabe que NO vino del NRC, y por eso no puede pisar la de otra parte.
+      expect(resolveCanonicalKeyWithSource({ nrc: '0000', nit: '06140203901028' })).toEqual({
+        key: '06140203901028',
+        source: 'nit',
+      });
+    });
+  });
+
+  it('`resolveCanonicalKey` devuelve exactamente la clave de esta función', () => {
+    // Las dos formas de llamar a la cascada no pueden divergir: una sola
+    // implementación, dos vistas.
+    const casos = [
+      { nrc: '1435153', nit: '11022205761034' },
+      { nrc: null, nit: '06140203901028' },
+      { nrc: null, nit: '022560911' },
+      { nrc: null, nit: 'EXT-9001' },
+    ];
+
+    for (const caso of casos) {
+      expect(resolveCanonicalKey(caso)).toBe(resolveCanonicalKeyWithSource(caso)?.key ?? null);
+    }
   });
 });

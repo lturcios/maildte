@@ -1,7 +1,7 @@
 # Addendum 11 — Identidad del contribuyente y segmentación por actividad económica
 
-**Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2 en curso:
-puntos 5, 2 y 3 implementados; falta 1 (constraint) y el punto 4 quedó diferido. Fase 3
+**Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2
+**cerrada**: puntos 5, 2, 3 y 1 implementados, el punto 4 diferido con condición de disparo. Fase 3
 **bloqueada** por la §7.4. Fase 4 sin empezar.
 **Origen:** dos hallazgos en el primer despliegue del Addendum 10 en producción (2026-09-09).
 **Depende de:** Addendum 10 (libro de compras), ya en `main`.
@@ -85,6 +85,10 @@ identificador del proveedor; la lógica se extrae a un helper compartido en luga
 **Consecuencia de esquema.** `@@unique([tenantId, nit])` deja de ser la identidad: un contribuyente
 puede tener varios NIT/DUI. La unicidad pasa a `@@unique([tenantId, canonicalKey])` y los
 identificadores vistos se conservan como datos de la parte, no como su clave.
+
+> **Corrección al implementar el punto 1 de la fase 2 (2026-09-10):** el `@@unique([tenantId,
+> nit])` **no se elimina**, convive con el de la clave canónica. Dejar de ser *la* identidad no es
+> lo mismo que dejar de ser único. Razones en "Lo implementado del punto 1", desvío 1.
 
 ---
 
@@ -204,6 +208,89 @@ parte y por documento en el camino caliente de la ingesta, para una ventana que 
 - **Índice `(tenantId, canonicalKey)`**, que la fase 1 omitió con el argumento de que la columna se
   escribía y no se consultaba. Eso dejó de ser cierto: la ingesta la consulta dos veces por documento
   y el export una vez por archivo. Lo reemplaza el UNIQUE del punto 1.
+
+#### Lo implementado del punto 1 (2026-09-10) — el constraint, y dos desvíos
+
+Cierra la fase. Migración `20260910041623_addendum_11_unique_identidad_canonica`: agrega
+`@@unique([tenantId, canonicalKey])` a `dte_parties` y elimina el índice no único
+`dte_parties_tenantId_canonicalKey_idx` que había creado el punto 2 (el UNIQUE da la misma
+búsqueda —mismas columnas, mismo orden— y además el constraint; mantener los dos sería pagar dos
+veces la escritura del índice en cada alta de parte sin ganar ninguna lectura).
+
+La migración **no puede correrse sobre una instalación con contribuyentes partidos**, así que
+empieza con un `DO $$ ... RAISE EXCEPTION $$` que cuenta los grupos con más de una fila por
+`(tenantId, canonicalKey)` y aborta con un mensaje que nombra el script de fusión y el §9.e del
+RUNBOOK. Sin esa guarda, el fallo es el error crudo de Postgres (`could not create unique index …
+is duplicated`), que no menciona ni el script ni el addendum: quien despliegue esto en una
+instalación que no fusionó va a leer el mensaje de la guarda, no el del índice. La fusión del
+histórico ya corrió en producción (34 partes, 34 con clave, cero grupos con más de una fila), así
+que ahí la guarda pasa de largo.
+
+**Efecto lateral que sí cambia la ingesta:** con el constraint en su lugar, dos ingestas
+concurrentes del mismo contribuyente nuevo dejan de poder crear dos filas. La segunda muere con un
+P2002 que se propaga, BullMQ la reintenta y en el reintento encuentra la parte y actualiza. Es la
+carrera que el punto 2 documentó como conocida y aceptada, y que esta migración cierra.
+
+##### Desvío 1 — `@@unique([tenantId, nit])` se CONSERVA
+
+La §2 decía "en reemplazo de". No se reemplaza: los dos constraints conviven. Tres razones:
+
+1. **Ese constraint nunca causó el split.** Lo causaba *resolver la identidad* por `nit` en la
+   ingesta, que es exactamente lo que corrigió el punto 2. Quitarlo no arregla nada que siga roto.
+2. **Es lo único que protege de duplicados a las partes con `canonicalKey` nula.** En Postgres los
+   nulos no colisionan entre sí, así que un UNIQUE sobre la clave canónica **no dice nada** de ese
+   caso. Esas partes existen por diseño (proveedor del exterior, identificador mal formado, DTE sin
+   NRC): la cascada devuelve `null` a propósito en vez de inventar una clave. Sin el UNIQUE del
+   identificador, dos partes sin clave con el mismo `nit` pasarían sin que nada las detenga — y
+   sería justo el caso que el punto 4 diferido se reserva para atacar.
+3. **No puede provocar un P2002 con la lógica actual de `findParty()`.** `nit` nunca se reescribe
+   en un update (regla del punto 2) y el `create` solo ocurre cuando ni la clave canónica ni el
+   identificador encontraron fila.
+
+##### Desvío 2 — el fallback de `findParty()` busca por `nit` **o** por `dui`
+
+El punto 2 dejó el fallback como `findUnique` por `(tenantId, nit)`. Pasa a un `findFirst` con
+`nit = X OR dui = X`, con el mismo `orderBy: { createdAt: 'asc' }` que ya usaba la búsqueda por
+clave.
+
+**El hueco que cierra, que es un split que reaparece después de fusionar.** `resolveCanonicalKey()`
+devuelve el NRC **solo si ese documento lo trae**. Encadenado con la fusión:
+
+1. El script de fusión dejó una parte canónica con `canonicalKey = '1435153'` (del NRC),
+   `nit = '11022205761034'` y —heredado de la hermana absorbida— `dui = '022560911'`. La fila de la
+   hermana ya no existe.
+2. Un proveedor emite **sin NRC** usando el identificador de 9 dígitos. La cascada cae a la rama del
+   DUI y resuelve `canonicalKey = '022560911'`.
+3. La búsqueda por clave no encuentra nada: la parte canónica tiene `1435153`.
+4. El fallback por `nit` tampoco: `022560911` era el `nit` de la fila borrada en la fusión. El
+   identificador sobrevive, pero en la columna `dui`.
+5. Se crea una parte nueva. **El contribuyente vuelve a estar partido.**
+
+**Y no lo habría detectado nada de lo que ya existe.** El script de fusión agrupa por
+`canonicalKey`: las dos filas tienen claves distintas, así que no forman un grupo y el `--dry-run`
+sale limpio. La guarda de export (`PURCHASE_BOOK_SPLIT_RECEPTOR`, punto 5) compara claves: por lo
+mismo, no ve hermanas. El UNIQUE tampoco, porque las claves son distintas. Volveríamos a exportar
+declaraciones incompletas en silencio — el problema exacto que originó el addendum, reintroducido
+por la mitad de la solución.
+
+**La trampa: el fallback, mal hecho, es peor que el hueco.** Al encontrar la parte por `dui`, el
+código del punto 2 le escribía la `canonicalKey` entrante — es decir, le ponía `022560911` a la
+parte fusionada, **destruyendo la clave derivada del NRC** y deshaciendo la fusión desde adentro,
+sin dejar registro. Regla implementada para escribir `canonicalKey` en un update
+(`DteIngestService.canonicalKeyUpdate()`):
+
+| Estado de la parte | Origen de la clave entrante | Qué pasa |
+|---|---|---|
+| `canonicalKey` nula | cualquiera | Se escribe. Es la única forma de que una parte vieja entre a la identidad canónica. |
+| ya tiene clave | **`nrc`** | Se escribe. Es el upgrade de la cascada: una parte con la clave del NIT recibe la del NRC en cuanto un documento lo trae. |
+| ya tiene clave | `nit` o `dui` | **No se toca.** |
+| — | ninguna (clave nula) | No se toca: "este documento no la resolvió" no es "esta parte no tiene". |
+
+**Dónde vive el origen.** La cascada no se duplicó en el servicio de ingesta. `identity/canonical-key.ts`
+expone `resolveCanonicalKeyWithSource()`, que devuelve `{ key, source }` con `source` en
+`'nrc' | 'nit' | 'dui'`, y `resolveCanonicalKey()` queda como su vista sin origen —misma firma que
+antes, para no tocar a sus otros llamadores—. Un test verifica que las dos formas no puedan
+divergir.
 
 #### Por qué se difiere el punto 4 (vista de ADMIN de candidatas a fusión)
 

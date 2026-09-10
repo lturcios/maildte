@@ -33,7 +33,6 @@ const prismaMock = {
   dteParseResult: { findFirst: jest.fn(), upsert: jest.fn() },
   dteParty: {
     findFirst: jest.fn(),
-    findUnique: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
   },
@@ -77,20 +76,52 @@ interface PartyRow {
   nit: string;
   dui: string | null;
   nrc: string | null;
+  /** Solo importa cuando el test tiene más de una fila candidata. */
+  createdAt?: Date;
+}
+
+/** Los dos `where` con los que el servicio busca una parte. */
+type PartyWhere = {
+  canonicalKey?: string;
+  OR?: ({ nit: string } | { dui: string })[];
+};
+
+interface PartyQuery {
+  where: PartyWhere;
+  orderBy?: { createdAt: 'asc' | 'desc' };
+}
+
+function matchesPartyWhere(row: PartyRow, where: PartyWhere): boolean {
+  if (where.canonicalKey !== undefined) return row.canonicalKey === where.canonicalKey;
+  return (where.OR ?? []).some((clause) =>
+    'nit' in clause ? row.nit === clause.nit : row.dui === clause.dui,
+  );
 }
 
 /**
- * Siembra el catálogo de partes que ya existían. Los mocks responden como la
- * base: por clave canónica primero, y si no, por el par (tenantId, nit).
+ * Siembra el catálogo de partes que ya existían. El mock responde como la base:
+ * por clave canónica primero y, si no, por cualquiera de los identificadores
+ * (`nit` o `dui`).
+ *
+ * **El orden lo aplica solo si la consulta lo pidió.** Es lo que hace
+ * verificable el criterio estable: si el servicio dejara de mandar
+ * `orderBy: { createdAt: 'asc' }`, el mock devolvería la primera sembrada y el
+ * test de desempate fallaría.
  */
 function seedParties(rows: PartyRow[]): void {
-  prismaMock.dteParty.findFirst.mockImplementation((args: { where: { canonicalKey: string } }) =>
-    Promise.resolve(rows.find((row) => row.canonicalKey === args.where.canonicalKey) ?? null),
-  );
-  prismaMock.dteParty.findUnique.mockImplementation(
-    (args: { where: { tenantId_nit: { nit: string } } }) =>
-      Promise.resolve(rows.find((row) => row.nit === args.where.tenantId_nit.nit) ?? null),
-  );
+  prismaMock.dteParty.findFirst.mockImplementation((args: PartyQuery) => {
+    const matches = rows.filter((row) => matchesPartyWhere(row, args.where));
+    if (args.orderBy?.createdAt === 'asc') {
+      matches.sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0));
+    }
+    return Promise.resolve(matches[0] ?? null);
+  });
+}
+
+/** El `where` con el que el servicio hizo la última búsqueda de parte. */
+function lastPartyQuery(): PartyQuery {
+  const call = prismaMock.dteParty.findFirst.mock.calls.at(-1);
+  return call?.[0] as PartyQuery;
 }
 
 /** `data` de los `create` de partes, en orden (emisor primero, receptor después). */
@@ -109,10 +140,15 @@ function partyUpdate(id: string): Record<string, unknown> {
   return (call?.[0] as { data: Record<string, unknown> }).data;
 }
 
-/** Copia de la muestra v4 con el receptor referenciado por otro identificador. */
-function ccfWithReceptorNit(nit: string): string {
-  const raw = JSON.parse(JSON.stringify(ccfV4)) as { receptor: { nit: string } };
+/**
+ * Copia de la muestra v4 con el receptor referenciado por otro identificador.
+ * Con `sinNrc` se simula el proveedor que emite sin NRC, que es el caso que
+ * obliga a la cascada a caer a la rama del identificador.
+ */
+function ccfWithReceptorNit(nit: string, options: { sinNrc?: boolean } = {}): string {
+  const raw = JSON.parse(JSON.stringify(ccfV4)) as { receptor: { nit: string; nrc?: string } };
   raw.receptor.nit = nit;
+  if (options.sinNrc) delete raw.receptor.nrc;
   return JSON.stringify(raw);
 }
 
@@ -351,16 +387,118 @@ describe('DteIngestService', () => {
 
       await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
-      expect(prismaMock.dteParty.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { tenantId_nit: { tenantId: TENANT_ID, nit: 'EXT-9001' } },
-        }),
-      );
+      expect(lastPartyQuery().where).toEqual({ tenantId: TENANT_ID, OR: [{ nit: 'EXT-9001' }] });
       const data = partyUpdate('party-extranjero');
       expect(data).not.toHaveProperty('nit');
       expect(data).not.toHaveProperty('canonicalKey');
       expect(data).not.toHaveProperty('dui');
       expect(partyCreates().map((party) => party.nit)).toEqual([EMISOR_NIT]);
+    });
+
+    it('una parte SIN clave canónica recibe la entrante, venga de la rama que venga', async () => {
+      // Es la única forma de que una parte vieja entre a la identidad canónica.
+      // Sin NRC, la clave sale de la rama del NIT y aun así se escribe.
+      seedParties([existingReceptor({ canonicalKey: null, nrc: null })]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(NIT_14, { sinNrc: true }) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(partyUpdate('party-receptor').canonicalKey).toBe(NIT_14);
+    });
+  });
+
+  describe('el hueco de la cascada tras la fusión (Addendum 11, fase 2 punto 1)', () => {
+    /**
+     * La parte canónica que dejó el script de fusión: su clave sale del NRC y,
+     * por la fusión, conserva el identificador de 9 dígitos de la hermana
+     * absorbida en `dui`. La fila de la hermana ya no existe.
+     */
+    const NRC = '54038';
+    const NIT_14 = '06140203901028';
+    const DUI_9 = '022560911';
+    const EMISOR_NIT = '027561310';
+
+    function fusedReceptor(overrides: Partial<PartyRow> = {}): PartyRow {
+      return {
+        id: 'party-fusionada',
+        canonicalKey: NRC,
+        nit: NIT_14,
+        dui: DUI_9,
+        nrc: NRC,
+        ...overrides,
+      };
+    }
+
+    it('un documento sin NRC con el identificador de 9 dígitos encuentra la parte por `dui`', async () => {
+      // La clave entrante es el DUI y no coincide con la de la parte; la
+      // búsqueda por `nit` tampoco la encuentra, porque esa fila se borró en la
+      // fusión. Sin el fallback por `dui` se crearía una parte nueva y el
+      // contribuyente volvería a partirse.
+      seedParties([fusedReceptor()]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9, { sinNrc: true }) as never);
+
+      expect(await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID)).toBe(
+        DteParseStatus.PARSEADO,
+      );
+
+      expect(partyCreates().map((party) => party.nit)).toEqual([EMISOR_NIT]);
+      expect(lastPartyQuery().where).toEqual({
+        tenantId: TENANT_ID,
+        OR: [{ nit: DUI_9 }, { dui: DUI_9 }],
+      });
+      const documento = (
+        prismaMock.purchaseDocument.create.mock.calls[0][0] as { data: Record<string, unknown> }
+      ).data;
+      expect(documento.receptorId).toBe('party-fusionada');
+    });
+
+    it('ese update NO pisa la clave canónica derivada del NRC', async () => {
+      // Escribirle `022560911` a la parte fusionada destruiría la clave buena y
+      // desharía la fusión desde adentro, sin que nada lo registre.
+      seedParties([fusedReceptor()]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9, { sinNrc: true }) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(partyUpdate('party-fusionada')).not.toHaveProperty('canonicalKey');
+    });
+
+    it('el upgrade de la cascada sigue funcionando: con NRC sí pisa una clave del NIT', async () => {
+      seedParties([fusedReceptor({ canonicalKey: NIT_14, nrc: null })]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(NIT_14) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      const data = partyUpdate('party-fusionada');
+      expect(data.canonicalKey).toBe(NRC);
+      expect(data.nrc).toBe(NRC);
+    });
+
+    it('el fallback resuelve el empate por `createdAt` ascendente', async () => {
+      // El identificador de 9 dígitos puede caer en dos filas: una parte vieja
+      // que lo tiene como `nit` y la fusionada que lo tiene como `dui`. Gana
+      // siempre la más antigua, para que la ingesta no alterne entre las dos
+      // documento a documento.
+      seedParties([
+        fusedReceptor({ createdAt: new Date('2026-05-01T00:00:00Z') }),
+        {
+          id: 'party-vieja',
+          canonicalKey: null,
+          nit: DUI_9,
+          dui: null,
+          nrc: null,
+          createdAt: new Date('2024-01-01T00:00:00Z'),
+        },
+      ]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9, { sinNrc: true }) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(lastPartyQuery().orderBy).toEqual({ createdAt: 'asc' });
+      const documento = (
+        prismaMock.purchaseDocument.create.mock.calls[0][0] as { data: Record<string, unknown> }
+      ).data;
+      expect(documento.receptorId).toBe('party-vieja');
     });
   });
 

@@ -47,17 +47,51 @@ export interface CanonicalKeyInput {
 }
 
 /**
- * Resuelve la clave canónica de una parte, o `null` si ninguna de las tres
- * ramas aplica.
+ * Rama de la cascada de la que salió la clave, en orden de confianza
+ * descendente: `nrc` identifica al contribuyente y es estable entre
+ * proveedores; `nit` y `dui` son uno de los identificadores con los que se lo
+ * referencia, y el mismo contribuyente puede tener los dos.
  */
-export function resolveCanonicalKey(party: CanonicalKeyInput): string | null {
+export type CanonicalKeySource = 'nrc' | 'nit' | 'dui';
+
+/** Clave canónica resuelta junto con la rama de la que salió. */
+export interface CanonicalKeyResolution {
+  key: string;
+  source: CanonicalKeySource;
+}
+
+/**
+ * Resuelve la clave canónica de una parte **con su origen**, o `null` si
+ * ninguna de las tres ramas aplica.
+ *
+ * El origen no es un dato decorativo: es lo que permite decidir si una clave
+ * entrante puede reemplazar a la que una parte ya tiene. Una clave derivada del
+ * NRC vale más que una derivada de un identificador, porque el NRC es el mismo
+ * en todos los documentos del contribuyente mientras que el identificador
+ * depende de cuál eligió cada proveedor. Sin el origen, un documento sin NRC
+ * emitido con el identificador de 9 dígitos le escribiría a la parte ya
+ * fusionada la clave del DUI y desharía la fusión desde adentro.
+ */
+export function resolveCanonicalKeyWithSource(
+  party: CanonicalKeyInput,
+): CanonicalKeyResolution | null {
   const nrc = stripLeadingZeros(onlyDigits(party.nrc));
-  if (nrc.length > 0) return nrc;
+  if (nrc.length > 0) return { key: nrc, source: 'nrc' };
 
   const id = onlyDigits(party.nit);
-  if (id.length === NIT_LENGTH || id.length === DUI_LENGTH) return id;
+  if (id.length === NIT_LENGTH) return { key: id, source: 'nit' };
+  if (id.length === DUI_LENGTH) return { key: id, source: 'dui' };
 
   // Longitud inesperada (proveedor del exterior, identificador mal formado) o
   // sin identificador: la parte queda sin clave y se ve en la consulta del gate.
   return null;
+}
+
+/**
+ * Resuelve la clave canónica de una parte, o `null` si ninguna de las tres
+ * ramas aplica. Es `resolveCanonicalKeyWithSource()` sin el origen, para los
+ * llamadores a los que solo les interesa la clave.
+ */
+export function resolveCanonicalKey(party: CanonicalKeyInput): string | null {
+  return resolveCanonicalKeyWithSource(party)?.key ?? null;
 }
