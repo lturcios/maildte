@@ -161,6 +161,47 @@ aparte, con su diagnóstico en el RUNBOOK §9: la firma de esta falla es **`llen
 **Gate:** un test que, con dos partes del mismo contribuyente, verifique que el export las incluye
 a las dos **o falla explícitamente**. Nunca que exporte una y omita la otra.
 
+#### El orden de ejecución de la fase NO es el de la lista: 5 → 2 → 3 → 4 → 1
+
+La lista está ordenada por dependencia de esquema, que no es el orden en que conviene desplegarla.
+El orden real, y por qué:
+
+| # | Punto | Por qué va acá |
+|---|---|---|
+| 1º | **5** — guarda de export | Corta hoy el bug fiscal que originó el addendum. Es lo único que cubre la ventana entre este momento y la fusión del histórico, que se confirma a mano. |
+| 2º | **2** — identidad en la ingesta | **Fusionar antes de esto es inútil.** Mientras la ingesta resuelva por `nit`, el próximo DTE de cualquiera de esos dos proveedores vuelve a partir al contribuyente y deshace la fusión recién hecha. Primero se cierra la fuente, después se limpia. |
+| 3º | **3** — script de fusión | Con la fuente cerrada, la fusión es definitiva: las partes absorbidas no pueden volver a crearse. |
+| 4º | **4** — vista de ADMIN | Es la interfaz de confirmación del punto 3; sin el script no tiene qué confirmar. |
+| 5º | **1** — `@@unique([tenantId, canonicalKey])` | Va último por obligación: el constraint **no se puede crear mientras existan duplicados**. Es el cierre, no la apertura. |
+
+El punto 2 se implementó, entonces, **antes** que el 3 y a propósito. Consecuencia asumida: entre el
+punto 2 y el punto 1 no hay constraint de unicidad sobre `canonicalKey`, así que dos ingestas
+concurrentes del mismo contribuyente nuevo con identificadores distintos pueden crear dos filas. El
+`@@unique([tenantId, nit])` vigente cubre el caso frecuente —las dos ingestas traen el mismo
+identificador— y el script de fusión limpia el resto. No se resuelve con locks: sería un lock por
+parte y por documento en el camino caliente de la ingesta, para una ventana que la fase cierra sola.
+
+#### Lo implementado del punto 2 (2026-09-10)
+
+- **`dui String?` en `DteParty`.** Es la columna que la fase 1 dejó pendiente (ver sus desvíos, punto
+  1). Con la identidad en la clave canónica, una parte legítimamente tiene un NIT de 14 dígitos y un
+  homologado al DUI de 9: si los dos se escriben en `nit`, cada documento pisa al anterior según qué
+  proveedor facturó último. Backfill determinístico en la misma migración: las filas cuyo
+  identificador mide 9 dígitos copian ese valor normalizado a `dui`.
+- **`nit` no se escribe nunca en un update.** Es la regla crítica de esta etapa. El
+  `@@unique([tenantId, nit])` sigue vigente y en producción existen las dos partes del mismo
+  contribuyente: escribirle a la parte `022560911` el nit `11022205761034` la haría chocar contra su
+  hermana y la ingesta moriría con un P2002. `dui` y `nrc` solo llenan huecos; los campos
+  descriptivos se siguen refrescando con cada documento.
+- **La búsqueda cae al `nit` cuando la clave canónica no encuentra fila**, no solo cuando la clave es
+  nula. Una parte creada desde un DTE sin NRC quedó con la clave del NIT, y el primer documento que
+  sí lo traiga resuelve otra clave: sin esa caída se intentaría crear una fila que choca contra el
+  unique vigente. La caída también es el camino de las partes sin clave, que conservan el
+  comportamiento anterior a la fase.
+- **Índice `(tenantId, canonicalKey)`**, que la fase 1 omitió con el argumento de que la columna se
+  escribía y no se consultaba. Eso dejó de ser cierto: la ingesta la consulta dos veces por documento
+  y el export una vez por archivo. Lo reemplaza el UNIQUE del punto 1.
+
 ### Fase 3 — Segmentación por actividad
 
 #### REVISIÓN OBLIGATORIA antes de implementar (2026-09-09)

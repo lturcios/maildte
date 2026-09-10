@@ -1395,6 +1395,48 @@ docker compose -f docker-compose.prod.yml exec postgres   psql -U maildte -d mai
   "
 ```
 
+### 9.c Despliegue del Addendum 11, fase 2 punto 2 (identidad por clave canónica)
+
+Desde este cambio la ingesta resuelve la parte del DTE por `canonicalKey` y ya
+**no** por `nit`: el contribuyente que unos proveedores referencian con el NIT de
+14 dígitos y otros con el homologado al DUI de 9 deja de partirse en dos filas
+nuevas. Las que ya están partidas **no se fusionan solas** — eso es el script de
+la fase (§4 del addendum) y se confirma a mano; hasta entonces el export del
+Anexo 3 de un receptor partido sigue bloqueado con
+`PURCHASE_BOOK_SPLIT_RECEPTOR`.
+
+La migración `20260910024854_addendum_11_party_dui_identidad_canonica` es
+aditiva: agrega `dui` a `dte_parties` (anulable), copia a esa columna los
+identificadores existentes de 9 dígitos y crea un índice sobre
+`(tenantId, canonicalKey)`. **No toca ningún constraint** — la unicidad declarada
+sigue siendo `(tenantId, nit)`. **No hace falta ventana de servicio y no hay
+backfill que correr:** el reparto de identificadores lo hace la propia migración
+y `PARSER_VERSION` no cambia. Se aplica con el mismo paso 2 del §2.c.
+
+Verificar que la columna quedó poblada. `partes_dui` es cuántas filas tienen un
+identificador de 9 dígitos; si da 0 en un tenant que sí tiene proveedores
+personas naturales, la migración no corrió:
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           count(*)                          AS partes,
+           count(p.dui)                      AS partes_dui,
+           count(*) FILTER (WHERE p.\"canonicalKey\" IS NULL) AS sin_clave
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    GROUP BY t.slug
+    ORDER BY t.slug;
+  "
+```
+
+Comprobación de que la resolución nueva está en efecto: la consulta de
+contribuyentes partidos del §9.b **no debe crecer** con los DTE que entren desde
+el despliegue. Si aparece un grupo nuevo con `partes > 1`, la ingesta está
+creando filas por identificador y hay que revisar `upsertParty()` antes de
+correr la fusión.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y

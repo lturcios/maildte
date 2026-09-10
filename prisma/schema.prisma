@@ -303,13 +303,24 @@ model DteParty {
   id              String  @id @default(uuid())
   tenantId        String
   tenant          Tenant  @relation(fields: [tenantId], references: [id])
-  nit             String // sin guiones, tal cual el DTE (9 = DUI homologado, 14 = NIT)
+  /// Primer identificador con el que se vio a esta parte, tal cual el DTE
+  /// (9 dígitos = DUI homologado, 14 = NIT). Desde el Addendum 11 fase 2 la
+  /// ingesta NUNCA lo sobrescribe: la identidad la resuelve `canonicalKey` y un
+  /// contribuyente puede ser referenciado por sus proveedores con los dos
+  /// identificadores. Pisarlo haría chocar a la parte con su hermana contra el
+  /// `@@unique([tenantId, nit])`, que sigue vigente hasta el final de la fase.
+  nit             String
+  /// Segundo identificador del mismo contribuyente, cuando sus proveedores lo
+  /// referencian también con el NIT homologado al DUI (9 dígitos). Se completa
+  /// solo si está vacío: nunca se reemplaza un identificador ya visto.
+  dui             String?
   nrc             String?
   /// Clave canónica del contribuyente (Addendum 11, §2): NRC normalizado, o el
-  /// NIT de 14 dígitos, o el DUI de 9. Se calcula en la ingesta con
-  /// `resolveCanonicalKey()` y por ahora SOLO se observa: la identidad sigue
-  /// siendo `@@unique([tenantId, nit])`. La unicidad se mueve acá en la fase 2,
-  /// después de mirar la data real de producción.
+  /// NIT de 14 dígitos, o el DUI de 9. La calcula `resolveCanonicalKey()` y
+  /// desde la fase 2 es la que RESUELVE la identidad en la ingesta. La unicidad
+  /// declarada sigue siendo `@@unique([tenantId, nit])` hasta que el script de
+  /// fusión elimine los duplicados del histórico; recién entonces se reemplaza
+  /// por `@@unique([tenantId, canonicalKey])`.
   canonicalKey    String?
   nombre          String
   nombreComercial String?
@@ -338,6 +349,12 @@ model DteParty {
   receptorDocuments PurchaseDocument[] @relation("DocReceptor")
 
   @@unique([tenantId, nit])
+  /// Índice de trabajo de la fase 2: desde que la ingesta resuelve la identidad
+  /// por clave canónica, esta columna se consulta dos veces por documento (una
+  /// por parte) y una vez por export. La fase 1 lo omitió a propósito porque
+  /// entonces la columna se escribía y no se leía. Lo reemplaza el
+  /// `@@unique([tenantId, canonicalKey])` del cierre de la fase.
+  @@index([tenantId, canonicalKey])
   @@index([tenantId, seenAsEmisor])
   @@index([tenantId, seenAsReceptor])
   @@map("dte_parties")

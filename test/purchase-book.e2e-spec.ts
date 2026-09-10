@@ -276,16 +276,26 @@ describe('Libro de compras (e2e)', () => {
       expect(res.body.data[0].receptorCodActividad).toBe('46900');
     });
 
-    it('guarda la clave canónica de las partes sin cambiar su identidad', async () => {
-      // Fase 1: se calcula y se guarda, pero `@@unique([tenantId, nit])` sigue
-      // siendo la identidad. ccf-v4: receptor nrc 54038.
+    it('guarda la clave canónica de las partes y el identificador con que se vieron', async () => {
+      // Addendum 11: la clave canónica es la que resuelve la identidad en la
+      // ingesta desde la fase 2. `nit` conserva el identificador de la primera
+      // vez y `dui` solo se llena con los de 9 dígitos. ccf-v4: receptor nrc
+      // 54038 con NIT de 14, emisor nrc 2717556 con DUI homologado de 9.
       const receptor = await prisma.dteParty.findUnique({
         where: { id: receptorV4Id },
-        select: { nit: true, nrc: true, canonicalKey: true },
+        select: { nit: true, dui: true, nrc: true, canonicalKey: true },
       });
       expect(receptor?.nrc).toBe('54038');
       expect(receptor?.canonicalKey).toBe('54038');
       expect(receptor?.nit).toBe(RECEPTOR_V4_NIT);
+      expect(receptor?.dui).toBeNull();
+
+      const emisor = await prisma.dteParty.findFirst({
+        where: { tenantId: tenantA.id, nit: '027561310' },
+        select: { dui: true, canonicalKey: true },
+      });
+      expect(emisor?.canonicalKey).toBe('2717556');
+      expect(emisor?.dui).toBe('027561310');
     });
 
     it('re-parsea sin force un documento leído con un parserVersion anterior', async () => {
