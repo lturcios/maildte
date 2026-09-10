@@ -1,7 +1,7 @@
 # Addendum 11 — Identidad del contribuyente y segmentación por actividad económica
 
 **Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2 en curso:
-puntos 5 y 2 implementados, faltan 3 (fusión), 4 (vista de confirmación) y 1 (constraint). Fase 3
+puntos 5, 2 y 3 implementados; falta 1 (constraint) y el punto 4 quedó diferido. Fase 3
 **bloqueada** por la §7.4. Fase 4 sin empezar.
 **Origen:** dos hallazgos en el primer despliegue del Addendum 10 en producción (2026-09-09).
 **Depende de:** Addendum 10 (libro de compras), ya en `main`.
@@ -153,9 +153,9 @@ aparte, con su diagnóstico en el RUNBOOK §9: la firma de esta falla es **`llen
    canonicalKey])` en reemplazo de `@@unique([tenantId, nit])`.
 2. Resolución de identidad en la ingesta con la cascada de la sección 2.
 3. **Script de fusión** (detalle en §4).
-4. Vista de ADMIN que liste las partes candidatas a fusión con su evidencia (mismo NRC, mismo
-   nombre) y permita confirmarlas. Aunque la resolución nueva sea automática, **la fusión del
-   histórico se confirma a mano**: es un cambio contable.
+4. ~~Vista de ADMIN que liste las partes candidatas a fusión con su evidencia (mismo NRC, mismo
+   nombre) y permita confirmarlas.~~ **DIFERIDA, fuera del alcance de la fase 2 (2026-09-10).** Ver
+   abajo.
 5. **Guarda de export**: si un receptor tiene partes hermanas sin fusionar, el export del Anexo 3
    lo advierte **antes** de generar el archivo. Sin esto seguimos exportando declaraciones
    incompletas en silencio, que es el problema que originó este addendum.
@@ -173,8 +173,9 @@ El orden real, y por qué:
 | 1º | **5** — guarda de export | Corta hoy el bug fiscal que originó el addendum. Es lo único que cubre la ventana entre este momento y la fusión del histórico, que se confirma a mano. |
 | 2º | **2** — identidad en la ingesta | **Fusionar antes de esto es inútil.** Mientras la ingesta resuelva por `nit`, el próximo DTE de cualquiera de esos dos proveedores vuelve a partir al contribuyente y deshace la fusión recién hecha. Primero se cierra la fuente, después se limpia. |
 | 3º | **3** — script de fusión | Con la fuente cerrada, la fusión es definitiva: las partes absorbidas no pueden volver a crearse. |
-| 4º | **4** — vista de ADMIN | Es la interfaz de confirmación del punto 3; sin el script no tiene qué confirmar. |
-| 5º | **1** — `@@unique([tenantId, canonicalKey])` | Va último por obligación: el constraint **no se puede crear mientras existan duplicados**. Es el cierre, no la apertura. |
+| 4º | **1** — `@@unique([tenantId, canonicalKey])` | Va último por obligación: el constraint **no se puede crear mientras existan duplicados**. Es el cierre, no la apertura. |
+
+El punto **4 sale de la fase**: el orden efectivo es **5 → 2 → 3 → 1**.
 
 El punto 2 se implementó, entonces, **antes** que el 3 y a propósito. Consecuencia asumida: entre el
 punto 2 y el punto 1 no hay constraint de unicidad sobre `canonicalKey`, así que dos ingestas
@@ -203,6 +204,30 @@ parte y por documento en el camino caliente de la ingesta, para una ventana que 
 - **Índice `(tenantId, canonicalKey)`**, que la fase 1 omitió con el argumento de que la columna se
   escribía y no se consultaba. Eso dejó de ser cierto: la ingesta la consulta dos veces por documento
   y el export una vez por archivo. Lo reemplaza el UNIQUE del punto 1.
+
+#### Por qué se difiere el punto 4 (vista de ADMIN de candidatas a fusión)
+
+La vista existía para confirmar a mano las fusiones. Tres hechos posteriores le sacaron el trabajo:
+
+1. **Hay un solo grupo que fusionar en toda la instalación** (gate de la fase 1): un contribuyente,
+   dos partes, un tenant.
+2. **El `--dry-run` del script ya es la interfaz de confirmación.** Imprime la canónica elegida, la
+   absorbida, el conteo de documentos de cada una, el `CONFLICTO` de defaults Q–T y el `AVISO` de
+   nombres que no coinciden. Es la misma evidencia que mostraría la vista, y la fusión real exige
+   `--apply` aparte.
+3. **Después del punto 1, dos partes con la misma clave canónica no se pueden crear.** La vista
+   nacería sin nada que listar.
+
+**No se descarta: se difiere, con una condición de disparo concreta.** Se construye cuando aparezca
+un caso que el constraint no cubre — partes con `canonicalKey` **nula** duplicadas, que es lo único
+que el UNIQUE deja pasar (en Postgres los nulos no colisionan). Hoy no hay ninguna en producción; la
+consulta que las detecta es la número 3 del gate de la fase 1 (RUNBOOK §9.b). Si esa consulta
+alguna vez devuelve filas, esta vista vuelve al alcance.
+
+Mientras tanto, la operación de fusión vive en el RUNBOOK §9.d y la corre un operador con acceso al
+host, que es la superficie correcta para una herramienta que borra filas de datos de clientes.
+
+---
 
 ### Fase 3 — Segmentación por actividad
 
