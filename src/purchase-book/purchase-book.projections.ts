@@ -192,3 +192,51 @@ export type PurchaseDocumentDetailRow = Prisma.PurchaseDocumentGetPayload<{
 }>;
 
 export type DtePartyRow = Prisma.DtePartyGetPayload<{ select: typeof PARTY_SELECT }>;
+
+// -----------------------------------------------------------------------------
+// Addendum 11 — fase 3: catálogo de actividad y mapeo de proveedores
+// -----------------------------------------------------------------------------
+
+/// Defaults Q–T de la actividad. Misma forma que los del receptor: la etapa que
+/// los consume desde `resolveClassification()` es una rebanada posterior.
+export const ACTIVITY_DEFAULTS_SELECT = {
+  defaultTipoOperacion: true,
+  defaultClasificacion: true,
+  defaultSector: true,
+  defaultTipoCostoGasto: true,
+} satisfies Prisma.PurchaseActivitySelect;
+
+export const ACTIVITY_SELECT = {
+  id: true,
+  receptorId: true,
+  nombre: true,
+  codActividad: true,
+  active: true,
+  ...ACTIVITY_DEFAULTS_SELECT,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.PurchaseActivitySelect;
+
+/**
+ * El mapeo viaja con el nombre del proveedor y el de la actividad: la pantalla
+ * de mapeo es una lista de proveedores, y resolver cada nombre con una consulta
+ * aparte por fila sería un N+1 sobre las ~30 filas que se muestran juntas.
+ */
+export const SUPPLIER_ACTIVITY_DEFAULT_SELECT = {
+  id: true,
+  receptorId: true,
+  emisorId: true,
+  activityId: true,
+  assignedById: true,
+  assignedAt: true,
+  emisor: { select: { id: true, nit: true, nombre: true } },
+  activity: { select: { id: true, nombre: true, codActividad: true, active: true } },
+} satisfies Prisma.SupplierActivityDefaultSelect;
+
+export type PurchaseActivityRow = Prisma.PurchaseActivityGetPayload<{
+  select: typeof ACTIVITY_SELECT;
+}>;
+
+export type SupplierActivityDefaultRow = Prisma.SupplierActivityDefaultGetPayload<{
+  select: typeof SUPPLIER_ACTIVITY_DEFAULT_SELECT;
+}>;

@@ -14,7 +14,9 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix('api/v1');
   app.enableCors({
     origin: config.corsOrigins,
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    // PUT lo usa el mapeo (proveedor, receptor) -> actividad del Addendum 11,
+    // que es un reemplazo idempotente y no una creación.
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Api-Key'],
   });
   app.useGlobalPipes(
