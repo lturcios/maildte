@@ -3,7 +3,7 @@ import { PinoLogger } from 'nestjs-pino';
 import { DteEnqueuer, EnqueueParseTarget } from './dte-enqueuer';
 import { DTE_QUEUE, DTE_PARSE_JOB_NAME, dteParseJobId } from './dte-queue.constants';
 
-const queueMock = { addBulk: jest.fn() };
+const queueMock = { addBulk: jest.fn(), remove: jest.fn() };
 const loggerMock = {
   setContext: jest.fn(),
   debug: jest.fn(),
@@ -16,12 +16,24 @@ function targets(...attachmentIds: string[]): EnqueueParseTarget[] {
   return attachmentIds.map((attachmentId) => ({ tenantId: 'tenant-1', attachmentId }));
 }
 
+/**
+ * `addBulk` devuelve un `Job` por cada entrada pedida, incluidas las que BullMQ
+ * absorbió como duplicado: no hay forma de distinguirlas desde el cliente. El
+ * doble sigue esa forma porque el retorno del método se calcula sobre ella.
+ */
+function acceptedJobs(jobs: { opts?: { jobId?: string } }[]): { id: string | undefined }[] {
+  return jobs.map((job) => ({ id: job.opts?.jobId }));
+}
+
 describe('DteEnqueuer', () => {
   let enqueuer: DteEnqueuer;
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    queueMock.addBulk.mockResolvedValue(undefined);
+    queueMock.addBulk.mockImplementation((jobs: { opts?: { jobId?: string } }[]) =>
+      Promise.resolve(acceptedJobs(jobs)),
+    );
+    queueMock.remove.mockResolvedValue(1);
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -75,5 +87,77 @@ describe('DteEnqueuer', () => {
       expect.objectContaining({ count: 3, trigger: 'reprocess', force: true }),
       expect.stringContaining('el lote se perdió'),
     );
+  });
+
+  /**
+   * El segundo modo de falla silenciosa de esta cola, verificado en producción
+   * el 2026-09-09: el `jobId` es determinístico y BullMQ ignora sin error un
+   * `add` cuyo id ya existe en Redis, así que con retención de completados los
+   * registros del backfill anterior absorbían el re-encolado. El backfill del
+   * Addendum 11 fase 1 reportó 968 trabajos encolados y reprocesó 419 documentos
+   * de 862. Sin retención de completados y borrando el id previo antes de
+   * encolar, el reprocesamiento vuelve a reprocesar.
+   */
+  it('no retiene los completados en Redis: el ledger en Postgres es el registro durable', async () => {
+    await enqueuer.enqueueParseBulk(targets('att-1'), 'sync');
+
+    expect(queueMock.addBulk.mock.calls[0][0][0].opts).toMatchObject({
+      removeOnComplete: true,
+      removeOnFail: 500,
+    });
+  });
+
+  it('el reprocesamiento libera el registro de job previo de cada id antes de encolar', async () => {
+    await enqueuer.enqueueParseBulk(targets('att-1', 'att-2'), 'reprocess', true);
+
+    expect(queueMock.remove).toHaveBeenCalledTimes(2);
+    expect(queueMock.remove).toHaveBeenCalledWith(dteParseJobId('att-1'));
+    expect(queueMock.remove).toHaveBeenCalledWith(dteParseJobId('att-2'));
+
+    // El orden importa: liberar después de encolar borraría el trabajo nuevo.
+    expect(queueMock.remove.mock.invocationCallOrder[0]).toBeLessThan(
+      queueMock.addBulk.mock.invocationCallOrder[0],
+    );
+  });
+
+  /**
+   * En el `sync` el colapso de duplicados es el comportamiento deseado: si el
+   * job del adjunto todavía está pendiente, un segundo encolado no tiene que
+   * duplicar el trabajo. Solo el reprocesamiento pide explícitamente releer.
+   */
+  it('el sync NO libera los ids previos', async () => {
+    await enqueuer.enqueueParseBulk(targets('att-1', 'att-2'), 'sync');
+
+    expect(queueMock.remove).not.toHaveBeenCalled();
+    expect(queueMock.addBulk).toHaveBeenCalledTimes(1);
+  });
+
+  it('un job activo no se puede liberar y eso no es un error: se encola igual', async () => {
+    queueMock.remove.mockResolvedValue(0); // BullMQ devuelve 0 con el job bloqueado
+
+    expect(await enqueuer.enqueueParseBulk(targets('att-1'), 'reprocess')).toBe(1);
+    expect(queueMock.addBulk).toHaveBeenCalledTimes(1);
+    expect(loggerMock.error).not.toHaveBeenCalled();
+    expect(loggerMock.warn).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Liberar el id es una mejora del reprocesamiento, no una precondición: si
+   * Redis rechaza la remoción, encolar igual deja el sistema en el estado del
+   * que venimos (duplicado absorbido), y no encolar lo dejaría peor.
+   */
+  it('si falla la liberación de un id, el encolado ocurre igual y el método no lanza', async () => {
+    queueMock.remove.mockRejectedValueOnce(new Error('Redis caído')).mockResolvedValueOnce(1);
+
+    const accepted = await enqueuer.enqueueParseBulk(targets('att-1', 'att-2'), 'reprocess');
+
+    expect(accepted).toBe(2);
+    expect(queueMock.addBulk).toHaveBeenCalledTimes(1);
+    expect(queueMock.addBulk.mock.calls[0][0]).toHaveLength(2);
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: dteParseJobId('att-1'), attachmentId: 'att-1' }),
+      expect.stringContaining('No se pudo liberar el registro de job previo'),
+    );
+    expect(loggerMock.error).not.toHaveBeenCalled();
   });
 });

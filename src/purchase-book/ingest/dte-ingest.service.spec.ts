@@ -31,7 +31,12 @@ const prismaMock = {
   tenant: { findUnique: jest.fn() },
   attachment: { findFirst: jest.fn() },
   dteParseResult: { findFirst: jest.fn(), upsert: jest.fn() },
-  dteParty: { upsert: jest.fn() },
+  dteParty: {
+    findFirst: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
   purchaseDocument: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn() },
   purchaseDocumentItem: { createMany: jest.fn(), deleteMany: jest.fn() },
   purchaseDocumentTax: { createMany: jest.fn(), deleteMany: jest.fn() },
@@ -65,6 +70,52 @@ function ledgerData(): Record<string, unknown> {
   return (call?.[0] as { create: Record<string, unknown> }).create;
 }
 
+/** Una fila de `DteParty` tal como la lee la resolución de identidad. */
+interface PartyRow {
+  id: string;
+  canonicalKey: string | null;
+  nit: string;
+  dui: string | null;
+  nrc: string | null;
+}
+
+/**
+ * Siembra el catálogo de partes que ya existían. Los mocks responden como la
+ * base: por clave canónica primero, y si no, por el par (tenantId, nit).
+ */
+function seedParties(rows: PartyRow[]): void {
+  prismaMock.dteParty.findFirst.mockImplementation((args: { where: { canonicalKey: string } }) =>
+    Promise.resolve(rows.find((row) => row.canonicalKey === args.where.canonicalKey) ?? null),
+  );
+  prismaMock.dteParty.findUnique.mockImplementation(
+    (args: { where: { tenantId_nit: { nit: string } } }) =>
+      Promise.resolve(rows.find((row) => row.nit === args.where.tenantId_nit.nit) ?? null),
+  );
+}
+
+/** `data` de los `create` de partes, en orden (emisor primero, receptor después). */
+function partyCreates(): Record<string, unknown>[] {
+  return prismaMock.dteParty.create.mock.calls.map(
+    (call) => (call[0] as { data: Record<string, unknown> }).data,
+  );
+}
+
+/** `data` del `update` de la parte con ese id. Falla si no hubo ninguno. */
+function partyUpdate(id: string): Record<string, unknown> {
+  const call = prismaMock.dteParty.update.mock.calls.find(
+    (candidate) => (candidate[0] as { where: { id: string } }).where.id === id,
+  );
+  expect(call).toBeDefined();
+  return (call?.[0] as { data: Record<string, unknown> }).data;
+}
+
+/** Copia de la muestra v4 con el receptor referenciado por otro identificador. */
+function ccfWithReceptorNit(nit: string): string {
+  const raw = JSON.parse(JSON.stringify(ccfV4)) as { receptor: { nit: string } };
+  raw.receptor.nit = nit;
+  return JSON.stringify(raw);
+}
+
 describe('DteIngestService', () => {
   let service: DteIngestService;
 
@@ -76,9 +127,11 @@ describe('DteIngestService', () => {
     prismaMock.attachment.findFirst.mockResolvedValue(attachmentRow());
     prismaMock.dteParseResult.findFirst.mockResolvedValue(null);
     prismaMock.dteParseResult.upsert.mockResolvedValue({});
-    prismaMock.dteParty.upsert.mockImplementation((args: { create: { nit: string } }) =>
-      Promise.resolve({ id: `party-${args.create.nit}` }),
+    seedParties([]);
+    prismaMock.dteParty.create.mockImplementation((args: { data: { nit: string } }) =>
+      Promise.resolve({ id: `party-${args.data.nit}` }),
     );
+    prismaMock.dteParty.update.mockResolvedValue({});
     prismaMock.purchaseDocument.create.mockResolvedValue({ id: 'doc-1' });
     prismaMock.purchaseDocument.findFirst.mockResolvedValue(null);
     prismaMock.purchaseDocumentItem.createMany.mockResolvedValue({ count: 1 });
@@ -116,7 +169,7 @@ describe('DteIngestService', () => {
       const status = await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
       expect(status).toBe(DteParseStatus.PARSEADO);
-      expect(prismaMock.dteParty.upsert).toHaveBeenCalledTimes(2);
+      expect(prismaMock.dteParty.create).toHaveBeenCalledTimes(2);
       expect(prismaMock.purchaseDocument.create).toHaveBeenCalledTimes(1);
       expect(prismaMock.purchaseDocumentItem.createMany).toHaveBeenCalledTimes(1);
       expect(ledgerData()).toMatchObject({
@@ -130,12 +183,10 @@ describe('DteIngestService', () => {
     it('marca al emisor y al receptor con su rol, sin pisar el otro', async () => {
       await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
-      const calls = prismaMock.dteParty.upsert.mock.calls.map(
-        (call) => call[0] as { create: Record<string, unknown> },
-      );
-      expect(calls[0].create).toMatchObject({ nit: '027561310', seenAsEmisor: true });
-      expect(calls[0].create).not.toHaveProperty('seenAsReceptor');
-      expect(calls[1].create).toMatchObject({ nit: '06140203901028', seenAsReceptor: true });
+      const [emisor, receptor] = partyCreates();
+      expect(emisor).toMatchObject({ nit: '027561310', seenAsEmisor: true });
+      expect(emisor).not.toHaveProperty('seenAsReceptor');
+      expect(receptor).toMatchObject({ nit: '06140203901028', seenAsReceptor: true });
     });
 
     it('guarda el rawJson y el snapshot del emisor en el documento', async () => {
@@ -166,17 +217,16 @@ describe('DteIngestService', () => {
       expect(data.emisorCodActividad).toBe('95110');
     });
 
-    it('guarda la clave canónica de cada parte sin cambiar la identidad', async () => {
+    it('guarda la clave canónica y el DUI de cada parte al crearla', async () => {
       await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
 
-      const calls = prismaMock.dteParty.upsert.mock.calls.map(
-        (call) => call[0] as { where: Record<string, unknown>; create: Record<string, unknown> },
-      );
-      // ccf-v4: emisor nrc 2717556, receptor nrc 54038.
-      expect(calls[0].create.canonicalKey).toBe('2717556');
-      expect(calls[1].create.canonicalKey).toBe('54038');
-      // La fase 1 no mueve la identidad: se sigue buscando por (tenantId, nit).
-      expect(calls[0].where).toEqual({ tenantId_nit: { tenantId: TENANT_ID, nit: '027561310' } });
+      // ccf-v4: emisor nrc 2717556 con identificador de 9 dígitos (DUI
+      // homologado), receptor nrc 54038 con NIT de 14.
+      const [emisor, receptor] = partyCreates();
+      expect(emisor.canonicalKey).toBe('2717556');
+      expect(emisor.dui).toBe('027561310');
+      expect(receptor.canonicalKey).toBe('54038');
+      expect(receptor.dui).toBeNull();
     });
 
     it('escribe todo dentro de una sola transacción con contexto de tenant', async () => {
@@ -198,6 +248,119 @@ describe('DteIngestService', () => {
         prismaMock.purchaseDocument.create.mock.calls[0][0] as { data: Record<string, unknown> }
       ).data;
       expect((data.ivaRetenido as Prisma.Decimal).toString()).toBe('1.77');
+    });
+  });
+
+  describe('identidad del contribuyente (Addendum 11, fase 2)', () => {
+    /** ccf-v4: el receptor viene con NIT de 14 dígitos y NRC 54038. */
+    const NIT_14 = '06140203901028';
+    /** El mismo contribuyente, referenciado por otro proveedor con su DUI. */
+    const DUI_9 = '022560911';
+    const NRC = '54038';
+    const EMISOR_NIT = '027561310';
+
+    /** La parte del receptor, ya creada desde un DTE que la referenciaba por NIT. */
+    function existingReceptor(overrides: Partial<PartyRow> = {}): PartyRow {
+      return {
+        id: 'party-receptor',
+        canonicalKey: NRC,
+        nit: NIT_14,
+        dui: null,
+        nrc: NRC,
+        ...overrides,
+      };
+    }
+
+    it('dos identificadores del mismo contribuyente resuelven a la misma parte', async () => {
+      seedParties([existingReceptor()]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9) as never);
+
+      expect(await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID)).toBe(
+        DteParseStatus.PARSEADO,
+      );
+
+      // El receptor se actualiza. El único create es el del emisor, que no existía.
+      expect(partyCreates().map((party) => party.nit)).toEqual([EMISOR_NIT]);
+      expect(partyUpdate('party-receptor')).toBeDefined();
+      const documento = (
+        prismaMock.purchaseDocument.create.mock.calls[0][0] as { data: Record<string, unknown> }
+      ).data;
+      expect(documento.receptorId).toBe('party-receptor');
+    });
+
+    it('el update NUNCA manda `nit`: pisarlo chocaría contra la parte hermana', async () => {
+      // Con el `@@unique([tenantId, nit])` todavía vigente y las dos partes del
+      // contribuyente vivas, escribirle a esta fila el identificador entrante la
+      // haría chocar contra su hermana y la ingesta moriría con un P2002.
+      seedParties([existingReceptor()]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(partyUpdate('party-receptor')).not.toHaveProperty('nit');
+    });
+
+    it('completa `dui` cuando el identificador entrante mide 9 dígitos', async () => {
+      seedParties([existingReceptor()]);
+      readFileMock.mockResolvedValue(ccfWithReceptorNit(DUI_9) as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(partyUpdate('party-receptor').dui).toBe(DUI_9);
+    });
+
+    it('no pisa el `dui` ni el `nrc` ya cargados', async () => {
+      seedParties([existingReceptor({ dui: DUI_9 })]);
+      // Otro proveedor referencia al mismo contribuyente con un tercer valor de
+      // 9 dígitos: no se reemplaza el identificador ya visto.
+      readFileMock.mockResolvedValue(ccfWithReceptorNit('040522092') as never);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      const data = partyUpdate('party-receptor');
+      expect(data).not.toHaveProperty('dui');
+      expect(data).not.toHaveProperty('nrc');
+      // Los campos descriptivos sí se siguen refrescando con cada documento.
+      expect(data.nombre).toBe('PROTECCION DE VALORES SA DE CV');
+    });
+
+    it('cae al nit cuando la parte existente todavía no tenía la clave del NRC', async () => {
+      // Creada desde un DTE sin NRC, su clave era el NIT de 14. El primer
+      // documento que sí lo trae resuelve otra clave: sin la caída al `nit` se
+      // intentaría crear una fila que choca contra el unique vigente.
+      seedParties([existingReceptor({ canonicalKey: NIT_14, nrc: null })]);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(partyCreates().map((party) => party.nit)).toEqual([EMISOR_NIT]);
+      const data = partyUpdate('party-receptor');
+      expect(data.canonicalKey).toBe(NRC);
+      expect(data.nrc).toBe(NRC);
+    });
+
+    it('una parte con clave canónica nula se sigue resolviendo por nit', async () => {
+      // Sin NRC y con un identificador que no mide 9 ni 14 dígitos, la cascada
+      // no resuelve nada: se conserva el comportamiento anterior a la fase 2.
+      const raw = JSON.parse(JSON.stringify(ccfV4)) as { receptor: { nit: string; nrc?: string } };
+      raw.receptor.nit = 'EXT-9001';
+      delete raw.receptor.nrc;
+      readFileMock.mockResolvedValue(JSON.stringify(raw) as never);
+      seedParties([
+        { id: 'party-extranjero', canonicalKey: null, nit: 'EXT-9001', dui: null, nrc: null },
+      ]);
+
+      await service.ingestAttachment(TENANT_ID, ATTACHMENT_ID);
+
+      expect(prismaMock.dteParty.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tenantId_nit: { tenantId: TENANT_ID, nit: 'EXT-9001' } },
+        }),
+      );
+      const data = partyUpdate('party-extranjero');
+      expect(data).not.toHaveProperty('nit');
+      expect(data).not.toHaveProperty('canonicalKey');
+      expect(data).not.toHaveProperty('dui');
+      expect(partyCreates().map((party) => party.nit)).toEqual([EMISOR_NIT]);
     });
   });
 

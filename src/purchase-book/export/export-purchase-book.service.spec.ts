@@ -13,6 +13,9 @@ const MAX_ROWS = 20_000;
 const RECEPTOR_ID = '22222222-2222-2222-2222-222222222222';
 const OTRO_RECEPTOR_ID = '33333333-3333-3333-3333-333333333333';
 const RECEPTOR_NIT = '06140203901028';
+const CANONICAL_KEY = '1435153';
+const HERMANA_ID = '44444444-4444-4444-4444-444444444444';
+const HERMANA_NIT = '022560911';
 
 const d = (value: string | number): Prisma.Decimal => new Prisma.Decimal(value);
 
@@ -63,6 +66,7 @@ function callWithTenantMock(_tenantId: string, fn: (tx: unknown) => unknown): un
 
 const prismaMock = {
   purchaseDocument: { count: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
+  dteParty: { findFirst: jest.fn(), findMany: jest.fn() },
   withTenant: jest.fn(callWithTenantMock),
 };
 
@@ -98,6 +102,11 @@ describe('ExportPurchaseBookService', () => {
     prismaMock.purchaseDocument.findMany.mockResolvedValue([exportRow()]);
     // Un solo receptor: el caso sano de la guarda fiscal.
     prismaMock.purchaseDocument.groupBy.mockResolvedValue([{ receptorId: RECEPTOR_ID }]);
+    // Receptor con clave canónica y sin partes hermanas: el caso sano de la
+    // guarda de identidad partida. Con clave (y no sin ella) para que el camino
+    // de búsqueda de hermanas se ejecute en todos los tests, no solo en los suyos.
+    prismaMock.dteParty.findFirst.mockResolvedValue({ canonicalKey: CANONICAL_KEY });
+    prismaMock.dteParty.findMany.mockResolvedValue([]);
 
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -174,6 +183,61 @@ describe('ExportPurchaseBookService', () => {
      * como validación de un uso normal. Verifica la lógica de la rama en
      * aislamiento: no detecta que alguien rompa el armado del `where`.
      */
+    /**
+     * Gate de la fase 2 del Addendum 11. El mismo contribuyente existe como dos
+     * partes porque unos proveedores lo identifican con el NIT de 14 dígitos y
+     * otros con el homologado al DUI, de 9. Exportar una de ellas deja las
+     * compras de la otra fuera de la declaración **sin ningún error**: el
+     * archivo se ve normal y está incompleto. La regla es incluir a las dos o
+     * fallar de forma explícita; nunca exportar una y omitir la otra.
+     */
+    it('rechaza el export cuando el receptor tiene una parte hermana con compras en el filtro', async () => {
+      mockCounts(849);
+      prismaMock.dteParty.findMany.mockResolvedValue([{ id: HERMANA_ID, nit: HERMANA_NIT }]);
+      prismaMock.purchaseDocument.count.mockResolvedValueOnce(7);
+
+      await expect(service.collectRows(adminCtx, exportDto())).rejects.toMatchObject({
+        status: 422,
+        response: { error: 'PURCHASE_BOOK_SPLIT_RECEPTOR' },
+      });
+      // Ni una fila emitida: la guarda corre antes de armar el archivo.
+      expect(prismaMock.purchaseDocument.findMany).not.toHaveBeenCalled();
+    });
+
+    it('cuenta las compras excluidas con el filtro del export, no con el histórico de la hermana', async () => {
+      // Una hermana con compras en OTRO período no afecta esta declaración. Si
+      // el conteo fuera "¿tiene documentos en algún lado?", el aviso sonaría
+      // cuando no pasa nada, y un aviso así enseña a ignorarlo.
+      mockCounts(849);
+      prismaMock.dteParty.findMany.mockResolvedValue([{ id: HERMANA_ID, nit: HERMANA_NIT }]);
+      prismaMock.purchaseDocument.count.mockResolvedValueOnce(0);
+
+      const result = await service.collectRows(adminCtx, exportDto({ month: '2026-05' }));
+
+      expect(result.rows).toHaveLength(1);
+      const excludedCall = prismaMock.purchaseDocument.count.mock.calls[2][0] as {
+        where: Record<string, unknown>;
+      };
+      expect(excludedCall.where).toMatchObject({
+        tenantId: TENANT_ID,
+        receptorId: { in: [HERMANA_ID] },
+      });
+      // El rango del filtro viaja al conteo: es el mismo período del export.
+      expect(excludedCall.where.fecEmi).toBeDefined();
+    });
+
+    it('no bloquea a un receptor sin clave canónica ni busca hermanas', async () => {
+      // La cascada NRC > NIT-14 > DUI-9 no lo cubrió. No se le inventa una
+      // identidad para bloquearle el export.
+      mockCounts(1);
+      prismaMock.dteParty.findFirst.mockResolvedValue({ canonicalKey: null });
+
+      const result = await service.collectRows(adminCtx, exportDto());
+
+      expect(result.rows).toHaveLength(1);
+      expect(prismaMock.dteParty.findMany).not.toHaveBeenCalled();
+    });
+
     it('rechaza un conjunto que mezcla compras de más de un receptor', async () => {
       mockCounts(2);
       prismaMock.purchaseDocument.groupBy.mockResolvedValue([

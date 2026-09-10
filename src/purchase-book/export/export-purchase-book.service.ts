@@ -125,6 +125,16 @@ export class ExportPurchaseBookService {
       });
     }
 
+    // Guarda de identidad partida (Addendum 11, fase 2, punto 5). Mientras la
+    // fusión del histórico no ocurra, un mismo contribuyente puede existir como
+    // dos partes —unos proveedores lo identifican con el NIT de 14 dígitos y
+    // otros con el homologado al DUI, de 9— y exportar una de ellas deja las
+    // compras de la otra fuera de la declaración, sin error y sin aviso. Es
+    // exactamente el problema que originó el addendum: no se puede resolver acá,
+    // pero sí se puede impedir que se presente una declaración incompleta sin
+    // que nadie lo sepa.
+    await this.assertNoSplitIdentity(tenantId, dto.receptorId, where);
+
     const rows = await this.buildRows(tenantId, where, total);
 
     if (rows.anomalies.supplierId > 0 || rows.anomalies.totalMismatch > 0) {
@@ -135,6 +145,75 @@ export class ExportPurchaseBookService {
     }
 
     return rows;
+  }
+
+  /**
+   * Falla si el receptor elegido tiene **partes hermanas** —misma clave canónica,
+   * distinta fila— con compras que este mismo filtro habría incluido de haber
+   * estado bajo el receptor elegido.
+   *
+   * El conteo se hace con el `where` del export y `receptorId` reemplazado por
+   * las hermanas, no con un "¿tiene documentos en algún lado?": una parte hermana
+   * sin compras en el período no afecta esta declaración, y avisar de ella
+   * sería ruido — y un aviso que suena cuando no pasa nada enseña a ignorarlo.
+   *
+   * Va DESPUÉS de las guardas de filtro vacío y de tope de filas, por la misma
+   * razón que la de receptor único: primero el error que describe el filtro.
+   */
+  private async assertNoSplitIdentity(
+    tenantId: string,
+    receptorId: string,
+    where: Prisma.PurchaseDocumentWhereInput,
+  ): Promise<void> {
+    const receptor = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.dteParty.findFirst({
+        where: { id: receptorId, tenantId },
+        select: { canonicalKey: true },
+      }),
+    );
+
+    // Sin clave canónica no hay con qué emparentar: la cascada NRC > NIT-14 >
+    // DUI-9 no cubrió a esta parte. No se inventa una identidad para bloquear un
+    // export; el gate de la fase 1 verificó que hoy en producción no hay ninguna
+    // en esa situación.
+    const canonicalKey = receptor?.canonicalKey;
+    if (!canonicalKey) return;
+
+    const siblings = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.dteParty.findMany({
+        where: { tenantId, canonicalKey, id: { not: receptorId } },
+        select: { id: true, nit: true },
+      }),
+    );
+
+    if (siblings.length === 0) return;
+
+    const excluded = await this.prisma.withTenant(tenantId, (tx) =>
+      tx.purchaseDocument.count({
+        where: { ...where, receptorId: { in: siblings.map((sibling) => sibling.id) } },
+      }),
+    );
+
+    if (excluded === 0) return;
+
+    const identifiers = siblings
+      .map((sibling) => sibling.nit)
+      .sort()
+      .join(', ');
+
+    this.logger.warn(
+      { tenantId, receptorId, canonicalKey, siblings: siblings.length, excluded },
+      'Export del Anexo 3 bloqueado: el receptor tiene partes sin fusionar con compras en el filtro',
+    );
+
+    throw new UnprocessableEntityException({
+      error: 'PURCHASE_BOOK_SPLIT_RECEPTOR',
+      message:
+        `El receptor elegido comparte identidad (clave canónica ${canonicalKey}) con ` +
+        `${siblings.length === 1 ? 'otra parte' : `otras ${siblings.length} partes`} sin fusionar ` +
+        `(${identifiers}). Quedarían ${excluded} compras fuera de esta declaración. ` +
+        'Hay que fusionar las partes antes de exportar.',
+    });
   }
 
   private async buildRows(

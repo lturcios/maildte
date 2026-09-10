@@ -1153,6 +1153,133 @@ Estados y qué significan:
 
 Tras corregir la causa, `mode=failed` vuelve a intentar solo lo que falló.
 
+### El backfill reporta éxito y no reprocesa nada (ids de job retenidos en Redis)
+
+Este es el modo de falla más caro de esta cola, porque **no aparece como error en
+ninguna parte**: el script termina con código 0, reporta un número alto de
+trabajos encolados, la cola se vacía enseguida y la base no se movió. Verificado
+en producción el 2026-09-09: el backfill de la fase 1 del Addendum 11 informó
+**968 trabajos encolados y reprocesó 419 documentos de 862**.
+
+**La firma son dos lecturas juntas:**
+
+| Señal | Valor que delata la falla |
+|---|---|
+| `llen bull:dte:wait` | `0`, apenas terminado el script |
+| `con_parser_2` de la consulta de verificación del §9.b | **menor que `documentos`** |
+| Logs de la API y del worker | sin `error` y sin `"el lote se perdió"` |
+| Desglose de estados del ledger | sin `ERROR` nuevo |
+
+Es el "cuarto caso" del §2.c paso 7 (`llen` en 0 con trabajo sin hacer) pero con
+la búsqueda de `"el lote se perdió"` vacía: el lote no se perdió en el camino a
+Redis, Redis lo recibió y lo descartó.
+
+**La causa.** El `jobId` de la cola `dte` es determinístico (`dte-<attachmentId>`,
+para que dos encolados del mismo adjunto no dupliquen trabajo) y **BullMQ ignora
+en silencio un `add`/`addBulk` cuyo `jobId` ya existe**: devuelve el job que ya
+estaba, sin excepción y sin aviso. Con la retención vieja de completados
+(`removeOnComplete: 500`) los registros de job del backfill anterior seguían en
+Redis con esos mismos ids, así que el re-encolado de esos adjuntos no hacía nada.
+El colapso no duraba lo que tardaba el adjunto: duraba los siguientes 500 jobs
+completados de toda la instalación.
+
+**Solo hace falta en instalaciones desplegadas antes del arreglo de
+`DteEnqueuer`** — el que pasó a `removeOnComplete: true` (el registro durable del
+parseo es `dte_parse_results` en Postgres, no el historial de Redis) y agregó la
+liberación explícita del id previo en el camino de reprocesamiento. Desde ese
+despliegue no quedan ids de completados que estorben y esta sección es historia.
+
+#### Confirmar el diagnóstico
+
+```bash
+# 1. La cola está vacía
+docker compose -f docker-compose.prod.yml exec redis redis-cli llen bull:dte:wait
+
+# 2. Cuántos registros de job retenidos hay, y de qué estado.
+#    `completed` con miles de entradas y `dte-*` con la misma magnitud es la falla.
+docker compose -f docker-compose.prod.yml exec redis redis-cli zcard bull:dte:completed
+docker compose -f docker-compose.prod.yml exec redis redis-cli zcard bull:dte:failed
+docker compose -f docker-compose.prod.yml exec redis redis-cli --scan --pattern 'bull:dte:dte-*' | wc -l
+
+# 3. Que no haya un lote perdido, que es otra falla con otro procedimiento
+docker compose -f docker-compose.prod.yml logs api worker | jq -c 'select(.msg | test("el lote se perdió"))'
+```
+
+Cómo se leen juntas:
+
+| `llen ...:wait` | Claves `bull:dte:dte-*` | `"el lote se perdió"` | Qué es | Qué hacer |
+|---|---|---|---|---|
+| `0` | `> 0` con `zcard completed` alto | sin resultados | **Ids retenidos.** El re-encolado se absorbió contra los jobs viejos. | El `eval` de mantenimiento de abajo y repetir el backfill. |
+| `0` | `0` o unos pocos | **con resultados** | El lote nunca llegó a Redis (Redis caído, sin memoria o rechazando la escritura). | §9, "Si responde `503 PURCHASE_BOOK_QUEUE_UNAVAILABLE`". Nada que liberar. |
+| `> 0` | cualquiera | sin resultados | La cola tiene trabajo pendiente: no es esta falla. | §2.c paso 7: está drenando o el worker no consume. |
+
+#### Liberar los ids huérfanos
+
+Un solo `eval`, atómico. Lee los ids que todavía están pendientes (`wait`,
+`paused`, `active`, `delayed`, `failed`, `prioritized`), **los preserva**, borra
+el resto de las claves `bull:dte:dte-*` y vacía el zset `bull:dte:completed`.
+Devuelve cuántas claves liberó.
+
+Preservar `failed` es deliberado: esos registros son la evidencia de fallos de
+infraestructura que pueden no haber dejado fila en el ledger, y el reprocesamiento
+nuevo los libera uno por uno cuando le toca cada adjunto.
+
+```bash
+cat > /tmp/liberar-ids-dte.lua <<'LUA'
+local prefix = 'bull:dte:'
+local pendientes = {}
+
+for _, estado in ipairs({'wait', 'paused', 'active', 'delayed', 'failed', 'prioritized'}) do
+  local clave = prefix .. estado
+  local tipo = redis.call('TYPE', clave)['ok']
+  local ids = {}
+  if tipo == 'list' then
+    ids = redis.call('LRANGE', clave, 0, -1)
+  elseif tipo == 'zset' then
+    ids = redis.call('ZRANGE', clave, 0, -1)
+  end
+  for _, id in ipairs(ids) do
+    pendientes[id] = true
+  end
+end
+
+local liberadas = 0
+local cursor = '0'
+repeat
+  local res = redis.call('SCAN', cursor, 'MATCH', prefix .. 'dte-*', 'COUNT', 500)
+  cursor = res[1]
+  for _, clave in ipairs(res[2]) do
+    -- De 'bull:dte:dte-<uuid>:logs' el id es 'dte-<uuid>': las claves auxiliares
+    -- de un job pendiente tampoco se tocan.
+    local id = string.sub(clave, string.len(prefix) + 1)
+    local sep = string.find(id, ':', 1, true)
+    if sep then
+      id = string.sub(id, 1, sep - 1)
+    end
+    if not pendientes[id] then
+      redis.call('DEL', clave)
+      liberadas = liberadas + 1
+    end
+  end
+until cursor == '0'
+
+redis.call('DEL', prefix .. 'completed')
+return liberadas
+LUA
+
+docker compose -f docker-compose.prod.yml cp /tmp/liberar-ids-dte.lua redis:/tmp/liberar-ids-dte.lua
+docker compose -f docker-compose.prod.yml exec redis sh -c \
+  'redis-cli eval "$(cat /tmp/liberar-ids-dte.lua)" 0'
+# -> (integer) 500    claves de job liberadas
+```
+
+Es idempotente y seguro con el worker corriendo: los jobs en vuelo están en
+`active` y quedan intactos. Volver a correrlo devuelve `(integer) 0`.
+
+Después de liberar, repetir el backfill en el modo que corresponda (§9.b para la
+fase 1 del Addendum 11) y verificar con la consulta de conciliación: ahora
+`con_parser_2` tiene que llegar a `documentos`.
+
 ### 9.b Despliegue del Addendum 11, fase 1 (actividad del receptor y clave canónica)
 
 La fase 1 del Addendum 11 agrega tres columnas y **sube `PARSER_VERSION` de 1 a
@@ -1169,15 +1296,27 @@ canónica, y la consulta del gate de abajo devuelve todo vacío. Tras aplicar la
 migración y reiniciar API y worker, correr el backfill en **modo `failed`**, que
 es el que alcanza a los documentos leídos con `parserVersion` anterior:
 
+Corre **fuera** del contenedor, igual que en el §2.c paso 6 y por la misma
+razón: la imagen de producción no trae `ts-node` — ni `pnpm`. Adentro del
+contenedor el entrypoint de `node:20-alpine` antepone `node` al primer argumento
+que no sea un ejecutable del PATH, así que el intento falla con un
+`MODULE_NOT_FOUND` de `/app/pnpm` que no menciona la causa real.
+
 ```bash
 cd /opt/maildte
+pnpm install                 # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate    # explícito, por si el postinstall no corrió
 
-# Ensayo primero, igual que en el §2.c paso 6
-docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed --dry-run
+# 1. Ensayo: cuenta qué se encolaría, sin tocar Redis
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 pnpm run backfill:purchase-book -- --mode=failed --dry-run
 
-# La corrida de verdad
-docker compose -f docker-compose.prod.yml run --rm api   pnpm run backfill:purchase-book -- --mode=failed
+# 2. La corrida de verdad
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte REDIS_URL=redis://:<REDIS_PASSWORD>@127.0.0.1:6380 pnpm run backfill:purchase-book -- --mode=failed
 ```
+
+`REDIS_URL` apunta al puerto **publicado** (`127.0.0.1:6380`), no al nombre de
+servicio interno `redis:6379` del `.env`. Ver el §2.c paso 6 para el detalle de
+la clave y de los desenlaces posibles.
 
 El seguimiento del consumo y los tres desenlaces posibles están en el **§2.c
 paso 7**: la cola es la misma y se leen igual. El re-parseo **conserva la
@@ -1255,6 +1394,169 @@ docker compose -f docker-compose.prod.yml exec postgres   psql -U maildte -d mai
     ORDER BY t.slug;
   "
 ```
+
+### 9.c Despliegue del Addendum 11, fase 2 punto 2 (identidad por clave canónica)
+
+Desde este cambio la ingesta resuelve la parte del DTE por `canonicalKey` y ya
+**no** por `nit`: el contribuyente que unos proveedores referencian con el NIT de
+14 dígitos y otros con el homologado al DUI de 9 deja de partirse en dos filas
+nuevas. Las que ya están partidas **no se fusionan solas** — eso es el script de
+la fase (§4 del addendum) y se confirma a mano; hasta entonces el export del
+Anexo 3 de un receptor partido sigue bloqueado con
+`PURCHASE_BOOK_SPLIT_RECEPTOR`.
+
+La migración `20260910024854_addendum_11_party_dui_identidad_canonica` es
+aditiva: agrega `dui` a `dte_parties` (anulable), copia a esa columna los
+identificadores existentes de 9 dígitos y crea un índice sobre
+`(tenantId, canonicalKey)`. **No toca ningún constraint** — la unicidad declarada
+sigue siendo `(tenantId, nit)`. **No hace falta ventana de servicio y no hay
+backfill que correr:** el reparto de identificadores lo hace la propia migración
+y `PARSER_VERSION` no cambia. Se aplica con el mismo paso 2 del §2.c.
+
+Verificar que la columna quedó poblada. `partes_dui` es cuántas filas tienen un
+identificador de 9 dígitos; si da 0 en un tenant que sí tiene proveedores
+personas naturales, la migración no corrió:
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           count(*)                          AS partes,
+           count(p.dui)                      AS partes_dui,
+           count(*) FILTER (WHERE p.\"canonicalKey\" IS NULL) AS sin_clave
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    GROUP BY t.slug
+    ORDER BY t.slug;
+  "
+```
+
+Comprobación de que la resolución nueva está en efecto: la consulta de
+contribuyentes partidos del §9.b **no debe crecer** con los DTE que entren desde
+el despliegue. Si aparece un grupo nuevo con `partes > 1`, la ingesta está
+creando filas por identificador y hay que revisar `upsertParty()` antes de
+correr la fusión.
+
+### 9.d Fusión de contribuyentes partidos (Addendum 11, fase 2 punto 3)
+
+Cierra el problema que originó el addendum: el mismo contribuyente quedó como
+dos filas de `dte_parties` porque unos proveedores lo identifican con el NIT de
+14 dígitos y otros con el homologado al DUI de 9. El §9.c cerró la **fuente**
+—la ingesta ya no crea partes nuevas partidas—, pero **el histórico no se
+fusiona solo**: mientras siga partido, el export del Anexo 3 de ese receptor
+está bloqueado con `PURCHASE_BOOK_SPLIT_RECEPTOR`, que es el aviso, no el
+arreglo.
+
+**Es un cambio contable y se confirma a mano.** El NRC compartido es evidencia
+fuerte, no prueba: el script reasigna documentos y borra filas, así que el
+ensayo con `--dry-run` no es opcional. `--dry-run` es además el **default**, y
+la fusión real exige `--apply`.
+
+**No hace falta ventana de servicio ni parar el worker.** Cada grupo se fusiona
+en su propia transacción y el script solo toca `dte_parties` y las columnas
+`receptorId` / `emisorId` de `purchase_documents`: no encola nada, no toca IMAP,
+no toca `lastUid` y no toca el storage. Aun así conviene correrlo en un momento
+de poco movimiento, para que la lista de grupos que se revisa a mano sea la
+misma que se aplica.
+
+Antes de empezar, sacar la lista de grupos a fusionar con la **segunda consulta
+del §9.b** (contribuyentes partidos). Es la que el script va a encontrar.
+
+Corre **en el host**, no dentro del contenedor, por la misma razón y con el
+mismo modo de falla que el §9.b (la imagen de producción no trae `ts-node` ni
+`pnpm`). A diferencia del backfill, **no necesita Redis**: le alcanza con
+`APP_DATABASE_URL`.
+
+```bash
+cd /opt/maildte
+pnpm install                 # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate    # explícito, por si el postinstall no corrió
+
+# 1. Ensayo: reporta qué fusionaría, sin escribir nada
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte pnpm run merge:dte-parties -- --tenant=wendy-cocar --dry-run
+
+# 2. La corrida de verdad, sobre el mismo tenant ya revisado
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte pnpm run merge:dte-parties -- --tenant=wendy-cocar --apply
+```
+
+Salida del ensayo, un bloque por grupo:
+
+```
+Fusión de partes por identidad canónica — tenant wendy-cocar, --dry-run (no se aplica nada)
+
+  tenant wendy-cocar
+    JOSE WALTER CRUZ MARAVILLA  nrc 1435153
+      canónica : 11022205761034  (849 documentos)
+      absorbe  : 022560911       (7 documentos)   -> 856 tras fusionar
+  ------------------------------------------------------------------
+  1 tenant, 1 grupo, 2 partes -> 1, 7 documentos reasignados
+```
+
+Cómo se lee cada bloque, y qué mirar **antes** de `--apply`:
+
+| Línea | Qué dice |
+|---|---|
+| `nrc 1435153` | De qué rama de la cascada (§2 del addendum) salió la clave con la que se agrupó: `nrc`, `nit` o `dui`. |
+| `canónica` | La parte que sobrevive: **la que más documentos tiene**, sumando los dos roles (emisor y receptor). Con empate gana la de `createdAt` más antiguo. Conserva su `nit`. |
+| `absorbe` | La parte que se borra. Sus documentos pasan a la canónica y sus identificadores (`dui`, `nrc`) la completan **solo si están vacíos**: nunca se pisa uno ya presente. |
+| `CONFLICTO` | Los defaults Q–T de las partes no coinciden. Gana el bloque **completo** de la parte con más documentos y el otro se descarta; las cuatro columnas nunca se mezclan entre partes. Revisar la clasificación del receptor en el panel después de fusionar. |
+| `AVISO` | Los nombres no coinciden entre las partes. Es la señal de que quizá **no** sean el mismo contribuyente: verificar contra la lista del §9.b antes de aplicar. |
+
+Con `--apply`, cada parte absorbida imprime además su **contenido completo**
+(`BORRADA <nit> (id …)` y todas sus columnas) antes de desaparecer. Es el único
+registro que queda de esa fila: si la corrida es larga, guardarla con `tee`.
+
+Notas de uso:
+
+- **`--dry-run` es el default.** Sin `--apply` no se escribe nada, ni siquiera
+  parcialmente.
+- `--apply` y `--dry-run` juntos son un **error**, no una precedencia: en una
+  herramienta que borra filas, adivinar cuál gana es peor que fallar.
+- `--tenant=<slug o id>` acota a un tenant. **Recomendado para la primera
+  corrida.** Sin él recorre todos, incluidos los tenants que no están `ACTIVO`:
+  la fusión es una corrección de integridad de datos ya escritos y el
+  `@@unique([tenantId, canonicalKey])` que cierra la fase se aplica a todas las
+  filas de la tabla, así que saltear un tenant suspendido dejaría duplicados que
+  harían fallar esa migración.
+- **Es seguro repetirlo.** La segunda corrida no encuentra grupos: las hermanas
+  ya no existen y la ingesta resuelve todo a la canónica.
+- **Una transacción por grupo.** Un grupo que falla se revierte entero (queda
+  como estaba, no fusionado a medias), el resto del tenant sigue, y su bloque lo
+  dice: `ERROR  el grupo no se fusionó (sin cambios): …`.
+- Un tenant que no se puede enumerar sale como `tenant <slug>  ERROR: …` y la
+  corrida sigue con el siguiente. Cualquier error, de grupo o de tenant, termina
+  el proceso con **código de salida distinto de cero**.
+- La salida se imprime **a medida que avanza**: lo que ya está en pantalla es
+  trabajo hecho aunque la corrida se corte después. Correrlo dentro de `tmux` si
+  hay muchos grupos.
+
+#### Verificación posterior
+
+```bash
+# 1. No debe quedar ningún canonicalKey con más de una parte.
+#    Cero filas es la condición que habilita el @@unique del cierre de la fase.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT \"tenantId\", \"canonicalKey\", count(*)
+    FROM dte_parties
+    GROUP BY \"tenantId\", \"canonicalKey\"
+    HAVING count(*) > 1;
+  "
+
+# 2. El total de documentos del contribuyente no cambió: 856 en el caso de
+#    arriba (849 + 7), el mismo número que imprimió "tras fusionar".
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT count(*) FROM purchase_documents WHERE \"receptorId\" = '<id de la canónica>';
+  "
+```
+
+El `<id de la canónica>` sale de la consulta del gate del §9.b, o del bloque
+`BORRADA` de la corrida (la canónica es la parte que **no** aparece ahí).
+
+Comprobación funcional: exportar el Anexo 3 de ese receptor desde el panel. Si
+sigue devolviendo `PURCHASE_BOOK_SPLIT_RECEPTOR`, la fusión no se aplicó (¿faltó
+el `--apply`?) o quedó otro grupo con la misma clave.
 
 ### Seguir el trabajo en los logs del worker
 
