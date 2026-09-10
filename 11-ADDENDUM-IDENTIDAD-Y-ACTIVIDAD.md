@@ -407,9 +407,13 @@ libre a secas (pierde el prellenado, que es lo que hace viable la carga inicial)
 
 **`PurchaseActivity`** — el catálogo, por contribuyente.
 
-- `tenantId`, `receptorId`, `nombre`, `codActividad String?`, `activo`, y los cuatro defaults Q–T
+- `tenantId`, `receptorId`, `nombre`, `codActividad String?`, `active`, y los cuatro defaults Q–T
   del punto 4 (`defaultTipoOperacion`, `defaultClasificacion`, `defaultSector`,
   `defaultTipoCostoGasto`).
+- El campo de retiro se llama **`active`**, en inglés, por la regla 23 de CLAUDE.md y para no
+  contradecir a `Tenant.active` ni a `MailProvider.active`, que son el mismo concepto. Los términos
+  del vocabulario fiscal (`nombre`, `codActividad`, `receptorId`) sí quedan en español porque vienen
+  del DTE.
 - `@@unique([tenantId, receptorId, nombre])`.
 - **`codActividad` NO es único**, a propósito. Dos locales del mismo rubro son dos unidades de
   negocio distintas con el mismo código CIIU. El código es una pista, no una identidad: el que
