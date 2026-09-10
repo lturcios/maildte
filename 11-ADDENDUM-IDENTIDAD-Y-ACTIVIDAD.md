@@ -2,8 +2,8 @@
 
 **Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2
 **cerrada**: puntos 5, 2, 3 y 1 implementados, el punto 4 diferido con condición de disparo. Fase 3
-**desbloqueada** con la §7.4 cerrada, pendiente de rehacer sus puntos 1, 2 y 4 sobre la fuente nueva.
-Fase 4 sin empezar.
+**desbloqueada y rediseñada** (puntos 1, 2 y 4 sobre la fuente de la §7.4), pendiente de
+implementación. Fase 4 sin empezar, y conviene diseñarla con la actividad incluida.
 **Origen:** dos hallazgos en el primer despliegue del Addendum 10 en producción (2026-09-09).
 **Depende de:** Addendum 10 (libro de compras), ya en `main`.
 
@@ -391,6 +391,103 @@ una forma de presentación**.
 4. Defaults Q–T por receptor **y actividad**: extender `resolveClassification()` a
    `override del documento > default por receptor+actividad > default por receptor > sin
    clasificar`. Es el cambio de mayor superficie del addendum y toca la regla 30 de `CLAUDE.md`.
+
+#### Rediseño de los puntos 1, 2 y 4 (2026-09-10)
+
+Los puntos 1, 2 y 4 de la lista de arriba están **superados**: describen un filtro sobre una columna
+del DTE, y la §7.4 convirtió la actividad en una capa de clasificación con su propio modelo. El
+punto 3 se mantiene sin cambios salvo el formato del sufijo (ver abajo).
+
+**Vocabulario — CERRADO: catálogo por receptor, con nombre propio y código CIIU opcional.** El
+contador ve "Restaurante"; el sistema conserva `56101` para prellenar el mapeo y para contrastar
+contra lo que declaran los proveedores. Ni el código a secas (nadie piensa en `56101`) ni el nombre
+libre a secas (pierde el prellenado, que es lo que hace viable la carga inicial).
+
+##### Modelo de datos
+
+**`PurchaseActivity`** — el catálogo, por contribuyente.
+
+- `tenantId`, `receptorId`, `nombre`, `codActividad String?`, `activo`, y los cuatro defaults Q–T
+  del punto 4 (`defaultTipoOperacion`, `defaultClasificacion`, `defaultSector`,
+  `defaultTipoCostoGasto`).
+- `@@unique([tenantId, receptorId, nombre])`.
+- **`codActividad` NO es único**, a propósito. Dos locales del mismo rubro son dos unidades de
+  negocio distintas con el mismo código CIIU. El código es una pista, no una identidad: el que
+  identifica es el nombre que le puso el contribuyente.
+- Nullable porque el contador puede crear una actividad que no corresponde a ningún código visto.
+
+**`SupplierActivityDefault`** — el mapeo, las ~30 filas que hacen viable todo lo demás.
+
+- `tenantId`, `receptorId`, `emisorId`, `activityId`, más quién lo definió y cuándo.
+- `@@unique([tenantId, receptorId, emisorId])`: un proveedor tiene un solo default por receptor.
+- **Es una relación ternaria y por eso no puede ser un campo del `DteParty` del emisor.** El mismo
+  distribuidor le vende a varios contribuyentes del mismo buzón y a cada uno le sirve una unidad de
+  negocio distinta. Un campo en el emisor sería global al tenant — el mismo error de forma que un
+  export mezclando receptores (§31 de `CLAUDE.md`).
+
+**`PurchaseDocument.activityId`** — el override, nullable, más `activityAssignedById` /
+`activityAssignedAt`. Es una decisión contable: tiene que quedar quién la tomó y cuándo, igual que
+`classifiedById` / `classifiedAt` de las columnas Q–T. Columnas propias y no reutilizadas: son dos
+decisiones distintas, tomadas en momentos distintos.
+
+##### Resolución, en dos etapas
+
+```
+actividad  = override del documento > default por (proveedor, receptor) > sin clasificar
+Q–T        = override del documento > default de la ACTIVIDAD RESUELTA > default del receptor > sin clasificar
+```
+
+La segunda depende de la primera: `resolveClassification()` pasa a necesitar la actividad ya
+resuelta, no el documento crudo. Sigue devolviendo el `source` de cada columna, así que la UI puede
+mostrar de dónde salió cada valor — y ahora tiene un origen más que distinguir. Un documento sin
+actividad resuelta degrada al default del receptor, que es el comportamiento actual: la cadena nueva
+no puede empeorar lo que hoy funciona.
+
+##### El filtro NO es `where activityId = X`
+
+La actividad efectiva es un valor derivado, así que filtrar por ella es:
+
+```
+(override = X)  OR  (override IS NULL  AND  default del proveedor para ese receptor = X)
+```
+
+**Se resuelve en la consulta, no materializando la actividad en el documento.** Materializar un
+`resolvedActivityId` haría el filtro trivial, pero obliga a recalcularlo cada vez que cambia un
+default de proveedor — y un recalculo que se olvida deja datos fiscales rancios sin que nada avise.
+La denormalización queda anotada como salida **si** el volumen la exige, con la regla de
+invalidación escrita antes de implementarla, nunca después.
+
+##### Siembra del catálogo y del mapeo
+
+Es lo que convierte la carga inicial en un trabajo de minutos. A partir de los
+`receptorCodActividad` que realmente aparecen en los DTE de ese receptor:
+
+1. Se propone **una actividad por código distinto**, con la descripción del DTE como nombre.
+2. Se propone el mapeo de **cada proveedor al código que declara con más frecuencia**.
+
+Sobre los datos reales del contribuyente conocido, la siembra propone 4 actividades y 30 filas de
+mapeo. El contador **fusiona** `56101` "RESTAURANTES" con `56107` "Actividades varias de
+restaurantes" — son el mismo negocio con dos etiquetas, y esa es justamente la conclusión de la
+revisión de esta fase —, descarta `10005` "Otros", y le quedan 30 filas confirmadas con cuatro
+decisiones. **Fusionar dos actividades propuestas tiene que ser una operación de la UI**, no un
+`DELETE` que deja el mapeo apuntando al vacío.
+
+##### Sufijo del nombre del archivo (punto 3)
+
+El punto 3 decía "siempre 5 dígitos", que con el catálogo ya no se cumple: una actividad puede no
+tener código. El sufijo pasa a ser el código cuando existe y un slug corto del nombre cuando no:
+`_act56101` o `_actrestaurante`, sanitizado con `sanitizeFilename()` y acotado en largo. Lo que **no**
+cambia es la regla que importa: sin filtro de actividad no hay sufijo, y la ausencia de sufijo sigue
+significando "contribuyente completo".
+
+##### Relación con la fase 4
+
+La clasificación masiva de la fase 4 estaba pensada para las cuatro columnas Q–T. Con este rediseño
+**la actividad es una quinta columna asignable en masa**, y es probablemente la primera que el
+contador va a querer usar: es la que ordena todo lo demás. Conviene diseñar la fase 4 con la
+actividad incluida desde el principio en vez de agregarla después.
+
+---
 
 ### Fase 4 — Clasificación masiva sobre el filtro activo
 
