@@ -1558,6 +1558,153 @@ Comprobación funcional: exportar el Anexo 3 de ese receptor desde el panel. Si
 sigue devolviendo `PURCHASE_BOOK_SPLIT_RECEPTOR`, la fusión no se aplicó (¿faltó
 el `--apply`?) o quedó otro grupo con la misma clave.
 
+Con la primera consulta en cero, la instalación queda habilitada para el §9.e,
+que es el paso que impide que el problema vuelva.
+
+### 9.e Constraint de identidad canónica (Addendum 11, fase 2 punto 1)
+
+Cierra la fase. La migración
+`20260910041623_addendum_11_unique_identidad_canonica` agrega
+`UNIQUE (tenantId, canonicalKey)` a `dte_parties` y elimina el índice no único
+que había creado el §9.c. Desde acá, dos filas del mismo contribuyente en el
+mismo tenant **dejan de ser representables**: lo que el §9.c cerró en la ingesta
+y el §9.d limpió del histórico, lo garantiza la base.
+
+> **LO CRÍTICO, y hay que leerlo antes de desplegar: si quedan contribuyentes
+> partidos, la migración ABORTA y la API NO LEVANTA.** El servicio `api` arranca
+> con `prisma migrate deploy && node dist/main.js`
+> (`docker-compose.prod.yml`): si la migración falla, el `&&` corta y el
+> contenedor nunca llega a servir. Y como el `worker` espera a que la `api` quede
+> *healthy*, **se cae el sistema entero, no solo el libro de compras**. La
+> migración no escribe nada antes de abortar, así que la base queda intacta y el
+> arreglo es fusionar y volver a levantar — pero el tiempo caído es real.
+> **Correr el §9.d (`merge:dte-parties --apply`) ANTES de traer este código**, no
+> después de ver el error.
+
+La migración empieza con una guarda (`DO $$ ... RAISE EXCEPTION $$`) que cuenta
+los grupos duplicados y aborta con un mensaje que dice qué hacer:
+
+```
+ERROR:  Hay 1 contribuyente(s) partido(s) en dte_parties (por ejemplo la clave canónica 1435153).
+        El UNIQUE (tenantId, canonicalKey) no se puede crear hasta fusionarlos.
+HINT:   Correr primero el script de fusión: pnpm run merge:dte-parties -- --tenant=<slug> --dry-run
+        y luego --apply (RUNBOOK 9.d). La consulta que los lista está en el RUNBOOK 9.e.
+```
+
+Sin la guarda, el mismo caso falla con el error crudo de Postgres
+(`could not create unique index "dte_parties_tenantId_canonicalKey_key" … Key
+("tenantId", "canonicalKey")=(…) is duplicated`), que no menciona el script de
+fusión. Si aparece **ese** mensaje y no el de arriba, la guarda no corrió: la
+migración que se está aplicando no es esta.
+
+**Si la migración ya abortó, fusionar no alcanza para destrabarla.** Prisma deja
+la migración marcada como fallida en `_prisma_migrations` y el siguiente
+`migrate deploy` se niega a seguir con `P3009` en vez de reintentarla. El orden
+de recuperación es: correr el §9.d, después marcar la fallida como revertida y
+recién entonces volver a levantar. La base quedó intacta —la guarda es la primera
+sentencia del archivo y no escribe nada—, así que "revertida" es literal:
+
+```bash
+cd /opt/maildte
+docker compose -f docker-compose.prod.yml run --rm --entrypoint sh api -c \
+  "node_modules/.bin/prisma migrate resolve --rolled-back 20260910041623_addendum_11_unique_identidad_canonica"
+docker compose -f docker-compose.prod.yml up -d api worker
+```
+
+#### 1. Verificación PREVIA — obligatoria, antes de traer el código
+
+Cero filas en la primera consulta es la condición que habilita la migración. Es
+la misma verificación posterior del §9.d, repetida acá a propósito: entre la
+fusión y este despliegue pueden haber entrado DTE nuevos.
+
+```bash
+# 1. Contribuyentes partidos. DEBE devolver cero filas.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug, p.\"canonicalKey\", count(*) AS partes
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    WHERE p.\"canonicalKey\" IS NOT NULL
+    GROUP BY t.slug, p.\"canonicalKey\"
+    HAVING count(*) > 1
+    ORDER BY count(*) DESC;
+  "
+
+# 2. Panorama por tenant. `sin_clave` son las partes que el UNIQUE NO cubre
+#    (en Postgres los nulos no colisionan): las sigue protegiendo el
+#    UNIQUE (tenantId, nit), que se conserva. Si este número crece con el
+#    tiempo, se dispara el punto 4 diferido del addendum.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT t.slug,
+           count(*)                                           AS partes,
+           count(p.\"canonicalKey\")                          AS con_clave,
+           count(*) FILTER (WHERE p.\"canonicalKey\" IS NULL) AS sin_clave
+    FROM dte_parties p
+    JOIN tenants t ON t.id = p.\"tenantId\"
+    GROUP BY t.slug
+    ORDER BY t.slug;
+  "
+```
+
+Si la consulta 1 devuelve filas: **parar acá** y correr el §9.d sobre cada tenant
+que aparezca. No hay atajo — la migración va a rechazar exactamente eso.
+
+#### 2. Aplicar
+
+Sin ventana de servicio, sin backfill y sin parar el worker: la migración solo
+crea un índice y borra otro sobre una tabla de catálogo (34 filas en producción),
+no toca datos, no cambia `PARSER_VERSION` y no encola nada. Se aplica con el
+mismo paso 2 del §2.c (traer el código, reconstruir, `prisma migrate deploy`).
+
+#### 3. Verificación POSTERIOR
+
+```bash
+# 1. El UNIQUE existe y el índice no único de la fase anterior ya no.
+#    Esperado: dte_parties_tenantId_canonicalKey_key con "UNIQUE INDEX", y
+#    ninguna fila llamada dte_parties_tenantId_canonicalKey_idx.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT indexname, indexdef
+    FROM pg_indexes
+    WHERE tablename = 'dte_parties'
+    ORDER BY indexname;
+  "
+
+# 2. El UNIQUE (tenantId, nit) SIGUE ahí. No se reemplazó: convive con el nuevo
+#    (desvío 1 del addendum). Si falta, se aplicó otra migración.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT conname FROM pg_constraint
+    WHERE conrelid = 'dte_parties'::regclass AND contype = 'u'
+    ORDER BY conname;
+  "
+
+# 3. La migración quedó registrada y sin errores.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT migration_name, finished_at, rolled_back_at
+    FROM _prisma_migrations
+    ORDER BY started_at DESC LIMIT 3;
+  "
+```
+
+Comprobación funcional: sincronizar una cuenta con DTE nuevos y volver a correr
+la consulta 1 de la verificación previa. Debe seguir dando cero filas — ahora ya
+no por disciplina de la ingesta sino porque la base no admite otra cosa.
+
+#### Qué cambia en la operación a partir de acá
+
+- **Un P2002 aislado en el worker al dar de alta una parte deja de ser un
+  incidente.** Con el constraint, dos ingestas concurrentes del mismo
+  contribuyente nuevo hacen que la segunda falle; BullMQ la reintenta y en el
+  reintento encuentra la parte. Se ve en los logs como un job que falla una vez y
+  pasa al reintentar. **Sí es un incidente** si el mismo adjunto agota los tres
+  reintentos con P2002: eso ya no es una carrera.
+- **El script de fusión sigue siendo útil**, pero solo para partes con
+  `canonicalKey` nula, que es lo único que el UNIQUE deja pasar. Hoy no hay
+  ninguna en producción.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y

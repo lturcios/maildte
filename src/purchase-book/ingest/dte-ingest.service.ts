@@ -7,7 +7,7 @@ import { isPrismaUniqueViolation } from '../../prisma/prisma-errors';
 import { StorageService } from '../../storage/storage.service';
 import { AppConfigService } from '../../config/app-config.service';
 import { parseDte, PARSER_VERSION } from '../parser/dte-parser';
-import { resolveCanonicalKey } from '../identity/canonical-key';
+import { CanonicalKeyResolution, resolveCanonicalKeyWithSource } from '../identity/canonical-key';
 import { splitSupplierId } from '../anexo/split-supplier-id';
 import { ParsedCcf, ParseOutcome } from '../parser/dte-parser.types';
 
@@ -395,21 +395,23 @@ export class DteIngestService {
    * compras de la otra fuera de la declaración.
    *
    * **`nit` no se escribe nunca en un update.** El `@@unique([tenantId, nit])`
-   * sigue vigente hasta que el script de fusión (§4 del addendum) elimine los
-   * duplicados del histórico: escribirle a la parte `022560911` el nit
-   * `11022205761034` la haría chocar contra su hermana y la ingesta moriría con
-   * un P2002. El identificador queda como se vio la primera vez; el segundo, si
-   * mide 9 dígitos, se guarda en `dui`. Los demás identificadores (`dui`, `nrc`)
-   * solo llenan huecos: completan lo que está vacío y no reemplazan lo visto.
+   * sigue vigente —y se conserva junto al de la clave canónica, ver el
+   * esquema—: escribirle a la parte `022560911` el nit `11022205761034` la haría
+   * chocar contra cualquier otra fila que ya tuviera ese identificador y la
+   * ingesta moriría con un P2002. El identificador queda como se vio la primera
+   * vez; el segundo, si mide 9 dígitos, se guarda en `dui`. Los demás
+   * identificadores (`dui`, `nrc`) solo llenan huecos: completan lo que está
+   * vacío y no reemplazan lo visto.
    *
-   * **Carrera conocida y aceptada.** Mientras no exista
-   * `@@unique([tenantId, canonicalKey])` —que llega al cierre de la fase,
-   * cuando ya no queden duplicados— dos ingestas concurrentes del mismo
-   * contribuyente nuevo, con identificadores distintos, pueden crear dos filas.
-   * El `@@unique([tenantId, nit])` vigente cubre el caso frecuente (las dos
-   * ingestas traen el mismo identificador) y el script de fusión limpia el
-   * resto. No se resuelve con locks: sería un lock por parte y por documento en
-   * el camino caliente de la ingesta para una ventana que la fase cierra sola.
+   * **La `canonicalKey` de una parte que ya la tiene solo la pisa el NRC.** Ver
+   * `canonicalKeyUpdate()`: es lo que impide que un documento sin NRC deshaga
+   * una fusión ya aplicada.
+   *
+   * **Concurrencia.** Con el `@@unique([tenantId, canonicalKey])` en su lugar,
+   * dos ingestas simultáneas del mismo contribuyente nuevo ya no pueden crear
+   * dos filas: la segunda muere con un P2002 que se propaga, BullMQ la reintenta
+   * y en el reintento encuentra la parte y actualiza. Antes del constraint esa
+   * carrera dejaba el contribuyente partido y había que fusionarlo a mano.
    */
   private async upsertParty(
     tx: Prisma.TransactionClient,
@@ -417,7 +419,8 @@ export class DteIngestService {
     party: ParsedCcf['emisor'],
     role: 'EMISOR' | 'RECEPTOR',
   ): Promise<string> {
-    const canonicalKey = resolveCanonicalKey(party);
+    const resolved = resolveCanonicalKeyWithSource(party);
+    const canonicalKey = resolved?.key ?? null;
     // Misma definición de "este identificador es un DUI" que usa la regla E/P
     // del anexo: la longitud del número sin separadores. Cadena vacía cuando no
     // mide 9 dígitos; una segunda definición acá sería la forma garantizada de
@@ -441,7 +444,7 @@ export class DteIngestService {
     // receptor en otro, y ninguno de los dos roles se pierde al actualizar.
     const roleFlags = role === 'EMISOR' ? { seenAsEmisor: true } : { seenAsReceptor: true };
 
-    const existing = await this.findParty(tx, tenantId, canonicalKey, party.nit);
+    const existing = await this.findParty(tx, tenantId, canonicalKey, party.nit, incomingDui);
 
     if (existing === null) {
       const created = await tx.dteParty.create({
@@ -464,9 +467,7 @@ export class DteIngestService {
       data: {
         ...descriptive,
         ...roleFlags,
-        // Una clave nula significa "este documento no permitió resolverla", no
-        // "esta parte no tiene": no se borra la que ya estaba calculada.
-        ...(canonicalKey !== null ? { canonicalKey } : {}),
+        ...this.canonicalKeyUpdate(existing.canonicalKey, resolved),
         ...(!existing.dui && incomingDui !== null ? { dui: incomingDui } : {}),
         ...(!existing.nrc && party.nrc ? { nrc: party.nrc } : {}),
       },
@@ -475,38 +476,106 @@ export class DteIngestService {
   }
 
   /**
-   * Busca la parte primero por clave canónica y, si no la encuentra, por el
-   * identificador del documento.
+   * Decide si la clave canónica entrante puede escribirse sobre la que la parte
+   * ya tiene. Devuelve el fragmento del `data` del update: vacío significa "no
+   * se toca".
    *
-   * El segundo paso no es decorativo ni es solo el camino de una clave nula: una
-   * parte creada desde un DTE sin NRC quedó con la clave del NIT, y el primer
-   * documento que sí traiga NRC resuelve otra clave. Sin caer al `nit` se
-   * intentaría crear una fila que choca contra el `@@unique([tenantId, nit])`
-   * vigente y mata la ingesta con un P2002.
+   * Tres casos, y el orden importa:
+   *
+   * 1. **La entrante es nula** → no se toca. Una clave nula significa "este
+   *    documento no permitió resolverla", no "esta parte no tiene": borrar la ya
+   *    calculada dejaría a la parte fuera del constraint y fuera de la búsqueda
+   *    por clave.
+   * 2. **La parte no tiene clave** → se escribe la entrante, sea de la rama que
+   *    sea. Es la única forma de que una parte vieja o creada desde un documento
+   *    incompleto entre a la identidad canónica.
+   * 3. **La parte ya tiene clave** → solo la pisa una clave derivada del **NRC**,
+   *    que es el nivel más alto de la cascada. Esto es lo que hace que el
+   *    upgrade siga funcionando (una parte con la clave del NIT recibe la del
+   *    NRC en cuanto un documento lo trae) sin que la degradación sea posible.
+   *
+   * **Por qué el caso 3 es una regla y no un detalle.** La parte canónica que
+   * dejó el script de fusión tiene la clave del NRC (`1435153`) y, por la
+   * fusión, también el `dui` de su hermana absorbida (`022560911`). Un proveedor
+   * que emita **sin NRC** usando ese identificador de 9 dígitos resuelve la
+   * clave `022560911` por la rama `dui`. Sin esta regla, el update le escribiría
+   * esa clave a la parte canónica, destruiría la clave buena y desharía la
+   * fusión desde adentro — y el histórico quedaría apuntando a una parte cuya
+   * identidad cambió sin que nada lo registre.
+   */
+  private canonicalKeyUpdate(
+    existingKey: string | null,
+    resolved: CanonicalKeyResolution | null,
+  ): { canonicalKey?: string } {
+    if (resolved === null) return {};
+    if (existingKey === null) return { canonicalKey: resolved.key };
+    if (resolved.source === 'nrc') return { canonicalKey: resolved.key };
+    return {};
+  }
+
+  /**
+   * Busca la parte primero por clave canónica y, si no la encuentra, por
+   * cualquiera de los identificadores del documento.
+   *
+   * El segundo paso no es decorativo ni es solo el camino de una clave nula.
+   * Cubre dos huecos de la cascada:
+   *
+   * - Una parte creada desde un DTE **sin NRC** quedó con la clave del NIT, y el
+   *   primer documento que sí traiga NRC resuelve otra clave. Sin caer al
+   *   identificador se intentaría crear una fila que choca contra el
+   *   `@@unique([tenantId, nit])` y mata la ingesta con un P2002.
+   * - A la inversa —y este es el que reintroduce el split—: un proveedor que
+   *   emite **sin NRC** usando el identificador de 9 dígitos de un contribuyente
+   *   ya fusionado resuelve la clave del DUI, que no es la de la parte canónica.
+   *   La búsqueda por clave no la encuentra, y la búsqueda por `nit` tampoco
+   *   porque esa fila se borró en la fusión: el identificador sobrevive en la
+   *   columna `dui` de la canónica. Por eso el fallback mira las **dos**
+   *   columnas. Sin esto se crearía una parte nueva y el contribuyente volvería
+   *   a partirse — invisible para el script de fusión, que agrupa por clave, y
+   *   para la guarda de export, que compara claves.
+   *
+   * `dui` se compara contra el identificador **normalizado** (solo dígitos),
+   * que es como lo escriben esta misma ingesta y el backfill de la migración;
+   * `nit` se compara contra el valor crudo, que es como se guardó.
    */
   private async findParty(
     tx: Prisma.TransactionClient,
     tenantId: string,
     canonicalKey: string | null,
     nit: string,
-  ): Promise<{ id: string; dui: string | null; nrc: string | null } | null> {
+    incomingDui: string | null,
+  ): Promise<{
+    id: string;
+    canonicalKey: string | null;
+    dui: string | null;
+    nrc: string | null;
+  } | null> {
+    // Puede haber más de una fila candidata: el UNIQUE de la clave canónica no
+    // alcanza al fallback, donde el mismo identificador de 9 dígitos puede ser
+    // el `nit` de una parte vieja y el `dui` de la parte que dejó la fusión. Se
+    // toma siempre la más antigua: un criterio estable evita que la ingesta
+    // alterne entre las dos documento a documento. Cuál queda como canónica lo
+    // decide el script de fusión, no el orden de llegada de los DTE.
+    const select = { id: true, canonicalKey: true, dui: true, nrc: true } as const;
+    const orderBy = { createdAt: 'asc' } as const;
+
     if (canonicalKey !== null) {
       const byCanonicalKey = await tx.dteParty.findFirst({
         // tenantId repetido en el where aunque RLS ya filtre: defensa en profundidad.
         where: { tenantId, canonicalKey },
-        select: { id: true, dui: true, nrc: true },
-        // Con los duplicados del histórico todavía sin fusionar puede haber más
-        // de una fila con la misma clave. Se toma siempre la más antigua: un
-        // criterio estable evita que la ingesta alterne entre hermanas documento
-        // a documento. Cuál queda como canónica lo decide el script de fusión.
-        orderBy: { createdAt: 'asc' },
+        select,
+        orderBy,
       });
       if (byCanonicalKey !== null) return byCanonicalKey;
     }
 
-    return tx.dteParty.findUnique({
-      where: { tenantId_nit: { tenantId, nit } },
-      select: { id: true, dui: true, nrc: true },
+    return tx.dteParty.findFirst({
+      where: {
+        tenantId,
+        OR: incomingDui !== null ? [{ nit }, { dui: incomingDui }] : [{ nit }],
+      },
+      select,
+      orderBy,
     });
   }
 

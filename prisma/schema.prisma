@@ -307,8 +307,8 @@ model DteParty {
   /// (9 dígitos = DUI homologado, 14 = NIT). Desde el Addendum 11 fase 2 la
   /// ingesta NUNCA lo sobrescribe: la identidad la resuelve `canonicalKey` y un
   /// contribuyente puede ser referenciado por sus proveedores con los dos
-  /// identificadores. Pisarlo haría chocar a la parte con su hermana contra el
-  /// `@@unique([tenantId, nit])`, que sigue vigente hasta el final de la fase.
+  /// identificadores. Pisarlo haría chocar a la parte contra el
+  /// `@@unique([tenantId, nit])`, que sigue vigente.
   nit             String
   /// Segundo identificador del mismo contribuyente, cuando sus proveedores lo
   /// referencian también con el NIT homologado al DUI (9 dígitos). Se completa
@@ -317,10 +317,10 @@ model DteParty {
   nrc             String?
   /// Clave canónica del contribuyente (Addendum 11, §2): NRC normalizado, o el
   /// NIT de 14 dígitos, o el DUI de 9. La calcula `resolveCanonicalKey()` y
-  /// desde la fase 2 es la que RESUELVE la identidad en la ingesta. La unicidad
-  /// declarada sigue siendo `@@unique([tenantId, nit])` hasta que el script de
-  /// fusión elimine los duplicados del histórico; recién entonces se reemplaza
-  /// por `@@unique([tenantId, canonicalKey])`.
+  /// desde la fase 2 es la que RESUELVE la identidad en la ingesta y la que
+  /// declara su unicidad. Anulable a propósito: una parte cuyo documento no trae
+  /// NRC y cuyo identificador no mide 9 ni 14 dígitos (proveedor del exterior)
+  /// no tiene clave, y eso se ve en la consulta del gate en vez de inventarse.
   canonicalKey    String?
   nombre          String
   nombreComercial String?
@@ -348,13 +348,23 @@ model DteParty {
   emisorDocuments   PurchaseDocument[] @relation("DocEmisor")
   receptorDocuments PurchaseDocument[] @relation("DocReceptor")
 
+  /// El `@@unique([tenantId, nit])` NO se reemplaza: convive con el de la clave
+  /// canónica (desvío 1 del cierre de la fase 2 del Addendum 11). Tres razones.
+  ///
+  /// 1. Nunca causó el split del contribuyente. Lo causaba *resolver la
+  ///    identidad* por `nit`, que es lo que se corrigió en el punto 2.
+  /// 2. Es lo único que protege de duplicados a las partes con `canonicalKey`
+  ///    NULA: en Postgres los nulos no colisionan entre sí, así que un UNIQUE
+  ///    sobre la clave canónica no dice nada de ese caso.
+  /// 3. No puede provocar un P2002 con la lógica actual de `findParty()`: `nit`
+  ///    nunca se reescribe en un update y el `create` solo ocurre cuando ni la
+  ///    clave ni el identificador encontraron fila.
   @@unique([tenantId, nit])
-  /// Índice de trabajo de la fase 2: desde que la ingesta resuelve la identidad
-  /// por clave canónica, esta columna se consulta dos veces por documento (una
-  /// por parte) y una vez por export. La fase 1 lo omitió a propósito porque
-  /// entonces la columna se escribía y no se leía. Lo reemplaza el
-  /// `@@unique([tenantId, canonicalKey])` del cierre de la fase.
-  @@index([tenantId, canonicalKey])
+  /// Identidad del contribuyente (Addendum 11, fase 2, punto 1). Da además la
+  /// búsqueda por clave que la ingesta hace dos veces por documento y el export
+  /// una vez por archivo, así que reemplaza al índice no único que creó la
+  /// migración del punto 2.
+  @@unique([tenantId, canonicalKey])
   @@index([tenantId, seenAsEmisor])
   @@index([tenantId, seenAsReceptor])
   @@map("dte_parties")
