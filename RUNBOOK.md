@@ -1705,6 +1705,276 @@ no por disciplina de la ingesta sino porque la base no admite otra cosa.
   `canonicalKey` nula, que es lo único que el UNIQUE deja pasar. Hoy no hay
   ninguna en producción.
 
+### 9.f Catálogo de actividad y mapeo por proveedor (Addendum 11, fase 3 rebanada 1)
+
+Abre la fase 3. La migración
+`20260910120000_addendum_11_fase_3_catalogo_actividad` da de alta la
+segmentación por actividad: el contribuyente que opera un restaurante y una
+distribuidora deja de tener un solo bloque de defaults Q–T para todas sus
+compras.
+
+Qué toca, exactamente:
+
+- **Dos tablas nuevas.** `purchase_activities` es el catálogo de actividades
+  **por receptor** (nombre, `codActividad` opcional, `active`, y los cuatro
+  defaults Q–T). `supplier_activity_defaults` es el mapeo
+  `(proveedor, receptor) -> actividad`, las ~30 filas que hacen viable la carga
+  inicial. Las dos llevan `GRANT` a `maildte_app` y `ENABLE` + `FORCE ROW LEVEL
+  SECURITY` con la policy `tenant_isolation`, escritos a mano en la migración
+  porque Prisma no genera nada de eso.
+- **Tres columnas nuevas, anulables, en `purchase_documents`** —que ya está
+  poblada—: `activityId`, `activityAssignedById` y `activityAssignedAt`. Es el
+  override de actividad del documento y la traza de quién lo puso.
+- **Un índice y una FK sobre esa misma tabla:**
+  `purchase_documents_tenantId_activityId_idx` y
+  `purchase_documents_activityId_fkey`, esta última **`ON DELETE RESTRICT`**: la
+  base impide borrar una actividad que un documento referencia, que es lo mismo
+  que ya responde la API con `422 PURCHASE_ACTIVITY_IN_USE`. Retirar una
+  actividad en uso es desactivarla, no borrarla.
+
+**No hay backfill, no cambia `PARSER_VERSION` y no se encola nada.** Esta
+rebanada no toca el parser ni la ingesta: las tres columnas nacen en `NULL` y se
+llenan desde el panel. Tampoco hace falta parar el worker (ver el lock de más
+abajo, que es lo único que hay que mirar antes).
+
+#### 1. El lock sobre `purchase_documents` — lo único que decide si esto necesita ventana
+
+`CREATE INDEX` (sin `CONCURRENTLY`) y `ADD CONSTRAINT ... FOREIGN KEY` toman
+locks bloqueantes sobre `purchase_documents`, y **Prisma corre el archivo entero
+dentro de UNA transacción**: el lock más fuerte que se tome se mantiene hasta el
+COMMIT final, no se libera al terminar cada sentencia. En este archivo el más
+fuerte es el `ACCESS EXCLUSIVE` del `ADD COLUMN` —instantáneo en sí mismo, solo
+cambia el catálogo—, así que durante toda la migración `purchase_documents`
+queda cerrada **también para lecturas**.
+
+Lo que decide la magnitud es el tamaño de la tabla, porque lo único que tarda es
+la construcción del índice y la validación de la FK. **Sacar el número antes de
+desplegar:**
+
+```bash
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT count(*) AS documentos,
+           pg_size_pretty(pg_total_relation_size('purchase_documents')) AS tamano
+    FROM purchase_documents;
+  "
+# -> documentos | tamano
+#      3.412    | 12 MB
+```
+
+Cómo leerlo, sin dramatizar y sin esconderlo:
+
+- **Decenas de miles de filas o menos** (la instalación actual): el índice se
+  construye en milisegundos y la validación de la FK no encuentra nada que
+  validar —las tres columnas acaban de nacer y están todas en `NULL`—. El lock
+  dura lo que dura la migración, o sea una fracción de segundo. **No hace falta
+  ventana de servicio.**
+- **Cientos de miles o más**: el `CREATE INDEX` empieza a contar en segundos y
+  ahí sí conviene aplicarlo en un momento de poco movimiento. Mientras el lock
+  esté tomado, un sync que esté archivando correo se queda esperando; si el
+  worker está leyendo DTE, esos jobs esperan y BullMQ los reintenta. No se
+  pierde nada, pero se nota.
+
+No hay un caso intermedio que requiera parar servicios: si el número de la
+consulta sorprende, la respuesta es elegir la hora, no apagar el worker.
+
+#### 2. Verificación PREVIA
+
+```bash
+# 1. Tamaño de purchase_documents — la consulta de arriba. Es la que decide si
+#    esto se aplica en cualquier momento o se elige la hora.
+
+# 2. La migración anterior de la fase 2 tiene que estar aplicada y SIN error.
+#    Esperado: finished_at con fecha y rolled_back_at en NULL. Si aparece con
+#    rolled_back_at cargado o sin finished_at, resolver ESO antes (RUNBOOK 9.e):
+#    `migrate deploy` no va a llegar a esta migración.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT migration_name, finished_at, rolled_back_at
+    FROM _prisma_migrations
+    WHERE migration_name = '20260910041623_addendum_11_unique_identidad_canonica';
+  "
+```
+
+#### 3. Aplicar
+
+Sin ventana de servicio, sin backfill, sin bump de `PARSER_VERSION` y sin parar
+el worker, con la salvedad de tamaño del punto 1. Se aplica con el **mismo paso
+2 del §2.c**: traer el código, reconstruir y dejar que el `api` corra
+`prisma migrate deploy` al arrancar.
+
+```bash
+cd /opt/maildte
+git pull
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml logs -f api | head -40
+# -> "1 migration found in prisma/migrations"
+# -> "The following migration(s) have been applied"
+```
+
+#### 4. Verificación POSTERIOR
+
+```bash
+# 1. Las dos tablas existen con RLS habilitado Y FORZADO.
+#    Esperado: dos filas, las dos con t | t.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT relname, relrowsecurity, relforcerowsecurity
+    FROM pg_class
+    WHERE relname IN ('purchase_activities','supplier_activity_defaults')
+    ORDER BY relname;
+  "
+
+# 2. La policy tenant_isolation está en las dos. Sin ella, RLS forzado sin
+#    política deja las tablas en 0 filas para la app: el catálogo se vería
+#    siempre vacío desde el panel.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT tablename, policyname, qual
+    FROM pg_policies
+    WHERE tablename IN ('purchase_activities','supplier_activity_defaults')
+    ORDER BY tablename;
+  "
+# -> las dos con policyname = tenant_isolation
+
+# 3. Los GRANT llegaron al rol de la aplicación.
+#    Esperado: 8 filas (SELECT, INSERT, UPDATE, DELETE por tabla).
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT table_name, privilege_type
+    FROM information_schema.role_table_grants
+    WHERE grantee = 'maildte_app'
+      AND table_name IN ('purchase_activities','supplier_activity_defaults')
+    ORDER BY table_name, privilege_type;
+  "
+
+# 4. Las tres columnas nuevas y la FK sobre purchase_documents.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT column_name, data_type, is_nullable
+    FROM information_schema.columns
+    WHERE table_name = 'purchase_documents'
+      AND column_name IN ('activityId','activityAssignedById','activityAssignedAt')
+    ORDER BY column_name;
+  "
+# -> las tres con is_nullable = YES
+
+#    La FK tiene que salir con confdeltype 'r' (RESTRICT). Si sale 'n'
+#    (SET NULL) se aplicó otra migración: con SET NULL el documento se quedaría
+#    con activityAssignedById apuntando a una actividad que ya no existe.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT conname, confdeltype
+    FROM pg_constraint
+    WHERE conname IN ('purchase_documents_activityId_fkey',
+                      'supplier_activity_defaults_activityId_fkey')
+    ORDER BY conname;
+  "
+
+# 5. La migración quedó registrada y sin errores.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT migration_name, finished_at, rolled_back_at
+    FROM _prisma_migrations
+    ORDER BY started_at DESC LIMIT 3;
+  "
+# -> la primera fila es 20260910120000_addendum_11_fase_3_catalogo_actividad,
+#    con finished_at cargado y rolled_back_at en NULL
+```
+
+#### 5. Comprobación funcional
+
+Los endpoints nuevos son **solo ADMIN**: el catálogo de unidades de negocio y el
+mapeo de proveedores son criterio contable, igual que la clasificación Q–T. La
+propuesta de siembra es de **solo lectura** y no escribe nada, así que se puede
+correr en producción sin compromiso.
+
+```bash
+API=https://<host>/api/v1
+TOKEN=<accessToken de un ADMIN del tenant>
+RECEPTOR=<id del receptor, el de /purchase-book/parties?role=RECEPTOR>
+
+# 1. Propuesta de siembra: deriva actividades y mapeo del histórico ya parseado.
+#    NO escribe. Si devuelve listas vacías, ese receptor no tiene compras con
+#    `receptorCodActividad` (lo trae la fase 1, RUNBOOK 9.b).
+curl -s "$API/purchase-book/activities/seed?receptorId=$RECEPTOR" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data | {
+    actividades: (.activities | length),
+    mapeos: (.mappings | length),
+    sinActividad: .documentsWithoutActivity
+  }'
+# -> {"actividades":2,"mapeos":28,"sinActividad":11}
+
+# 2. Catálogo del receptor. Recién desplegado tiene que responder 200 con una
+#    lista vacía: es la prueba de que la policy tenant_isolation deja leer la
+#    tabla nueva con el rol de la aplicación.
+curl -s "$API/purchase-book/activities?receptorId=$RECEPTOR" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data'
+# -> []
+```
+
+Un `500` en cualquiera de las dos es señal de que la sección de GRANT + RLS de
+la migración no corrió; un `200` con lista vacía **después** de haber sembrado
+significa lo contrario: la policy está pero el `SET LOCAL app.tenant_id` no
+llegó. Un `404 DTE_PARTY_NOT_FOUND` es que ese `receptorId` no es de este
+tenant, y está bien que sea 404.
+
+La siembra de verdad (`POST /purchase-book/activities/seed`, con
+`confirm: true`) se hace desde el panel, después de que el contador revise,
+fusione y descarte la propuesta. Es idempotente: una segunda corrida no duplica
+nada y reporta lo que salteó.
+
+#### 6. Si la migración falla
+
+Igual que en el §9.e, y con la misma consecuencia: el servicio `api` arranca con
+`prisma migrate deploy && node dist/main.js`, así que una migración que falla
+corta el `&&`, el contenedor nunca sirve, y el `worker` que espera a que la `api`
+quede *healthy* también se cae. **Se cae el sistema entero, no solo el libro de
+compras.**
+
+Prisma marca la migración como fallida en `_prisma_migrations` y el siguiente
+`migrate deploy` se niega a seguir con **`P3009`** en vez de reintentarla. Como
+todo el archivo va en una sola transacción, un fallo lo revierte completo: no
+quedan tablas a medias ni columnas sueltas, así que "revertida" es literal y no
+hay nada que limpiar a mano.
+
+```bash
+cd /opt/maildte
+docker compose -f docker-compose.prod.yml run --rm --entrypoint sh api -c \
+  "node_modules/.bin/prisma migrate resolve --rolled-back 20260910120000_addendum_11_fase_3_catalogo_actividad"
+docker compose -f docker-compose.prod.yml up -d api worker
+```
+
+Después de destrabarlo, la causa se busca en el log del intento fallido
+(`docker compose -f docker-compose.prod.yml logs api`). El modo de falla
+esperable no es el contenido de la migración —no valida nada del histórico, a
+diferencia del §9.e— sino un **timeout de lock** en una instalación grande: en
+ese caso se reintenta en un momento de menos movimiento, con el número de la
+consulta del punto 1 a la vista.
+
+#### Rollback
+
+La migración es aditiva y no destructiva: revertir es volver la imagen a la
+versión anterior.
+
+```bash
+git checkout <commit-anterior>
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Las dos tablas nuevas y las tres columnas quedan en la base sin uso —el código
+viejo no las mira— y nada de lo anterior cambió, así que la sincronización, la
+lectura de DTE y el export del Anexo 3 siguen igual: las columnas Q–T se
+resuelven todavía por override del documento y default del receptor, que es
+exactamente lo que hacían antes de esta rebanada. Lo único que se pierde al
+revertir es el acceso: las rutas `/purchase-book/activities` y
+`/purchase-book/supplier-activity-defaults` dejan de existir.
+
+**Un catálogo ya sembrado no se pierde y no estorba.** Si se vuelve a desplegar
+más adelante, las filas siguen ahí y el mapeo también. Bajar el esquema (borrar
+las tablas) no es parte del rollback y no hace falta: `purchase_documents` no
+depende de ellas para nada de lo que ya funcionaba.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y

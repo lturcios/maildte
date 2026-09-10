@@ -9,6 +9,7 @@ import { AppModule } from '../src/app.module';
 import { DteIngestService } from '../src/purchase-book/ingest/dte-ingest.service';
 import { PurchaseBookIngestModule } from '../src/purchase-book/ingest/purchase-book-ingest.module';
 import { PARSER_VERSION } from '../src/purchase-book/parser/dte-parser';
+import { SEED_MAX_MAPPINGS } from '../src/purchase-book/dto/activity-seed.dto';
 import { createSeedClient, seedApiKey, seedTenant, seedUser } from './helpers/tenant-fixtures';
 import ccfV3 from '../src/purchase-book/__fixtures__/ccf-v3.json';
 import ccfV4 from '../src/purchase-book/__fixtures__/ccf-v4.json';
@@ -32,6 +33,7 @@ describe('Libro de compras (e2e)', () => {
   let apiKeyA: string;
   let apiKeyB: string;
   let adminTokenA: string;
+  let adminTokenB: string;
   let miembroTokenA: string;
   let superadminToken: string;
 
@@ -39,6 +41,9 @@ describe('Libro de compras (e2e)', () => {
   let docV4Id: string;
   let receptorV3Id: string;
   let receptorV4Id: string;
+  let emisorV4Id: string;
+  /** Receptor del MISMO DTE en el tenant B: es otra fila, de otro tenant. */
+  let receptorBId: string;
 
   /**
    * Los dos DTE de muestra están dirigidos a receptores distintos: es el caso
@@ -169,12 +174,13 @@ describe('Libro de compras (e2e)', () => {
     const adminA = await seedUser(prisma, tenantA.id, 'ADMIN');
     const miembroA = await seedUser(prisma, tenantA.id, 'MIEMBRO');
     const superadmin = await seedUser(prisma, null, 'SUPERADMIN');
-    await seedUser(prisma, tenantB.id, 'ADMIN');
+    const adminB = await seedUser(prisma, tenantB.id, 'ADMIN');
 
     apiKeyA = (await seedApiKey(prisma, tenantA.id)).plainKey;
     apiKeyB = (await seedApiKey(prisma, tenantB.id)).plainKey;
 
     adminTokenA = await login(adminA.email, adminA.password);
+    adminTokenB = await login(adminB.email, adminB.password);
     miembroTokenA = await login(miembroA.email, miembroA.password);
     superadminToken = await login(superadmin.email, superadmin.password);
 
@@ -213,7 +219,7 @@ describe('Libro de compras (e2e)', () => {
 
     const docs = await prisma.purchaseDocument.findMany({
       where: { tenantId: tenantA.id },
-      select: { id: true, version: true, receptorId: true },
+      select: { id: true, version: true, receptorId: true, emisorId: true },
     });
     const v3 = docs.find((d) => d.version === 3)!;
     docV3Id = v3.id;
@@ -221,6 +227,14 @@ describe('Libro de compras (e2e)', () => {
     const v4 = docs.find((d) => d.version === 4)!;
     docV4Id = v4.id;
     receptorV4Id = v4.receptorId;
+    emisorV4Id = v4.emisorId;
+
+    receptorBId = (
+      await prisma.purchaseDocument.findFirstOrThrow({
+        where: { tenantId: tenantB.id },
+        select: { receptorId: true },
+      })
+    ).receptorId;
   }
 
   const get = (path: string, key = apiKeyA) =>
@@ -590,6 +604,324 @@ describe('Libro de compras (e2e)', () => {
         .send({ defaultSector: 1 });
 
       expect(res.status).toBe(403);
+    });
+  });
+
+  /**
+   * Catálogo de actividad y mapeo de proveedores (Addendum 11, fase 3).
+   *
+   * Es la única cobertura que ejerce contra un Postgres REAL las dos tablas
+   * nuevas: los unit tests mockean PrismaService entero, así que el
+   * `FORCE ROW LEVEL SECURITY` y la policy `tenant_isolation` escritos a mano en
+   * la migración no se prueban en ningún otro lado. Acá todo pasa por HTTP con
+   * el rol de aplicación, o sea con RLS activo.
+   *
+   * PRESUPUESTO de `POST /activities/seed`: 5 llamadas por minuto (`@Throttle`
+   * del controller) y este bloque usa 4. Antes de agregar una, sacar otra o
+   * subir el tope; si no, aparecen 429 que parecen fallos ajenos.
+   *
+   * Los tests de este bloque comparten estado a propósito y corren en orden:
+   * la siembra crea el catálogo que los siguientes listan, desactivan y
+   * comprueban que no se puede borrar.
+   */
+  describe('catálogo de actividad (Addendum 11, fase 3)', () => {
+    const asAdminA = (method: 'get' | 'post' | 'patch' | 'put' | 'delete', path: string) =>
+      request(app.getHttpServer())
+        [method](`/api/v1${path}`)
+        .set('Authorization', `Bearer ${adminTokenA}`);
+
+    const asAdminB = (method: 'get' | 'post' | 'patch', path: string) =>
+      request(app.getHttpServer())
+        [method](`/api/v1${path}`)
+        .set('Authorization', `Bearer ${adminTokenB}`);
+
+    /** Actividad creada por la siembra: la usan los tests posteriores. */
+    let seededActivityId: string;
+
+    describe('rol y validación', () => {
+      it('un MIEMBRO no lista el catálogo: es criterio contable, como la clasificación', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`/api/v1/purchase-book/activities?receptorId=${receptorV4Id}`)
+          .set('Authorization', `Bearer ${miembroTokenA}`);
+
+        expect(res.status).toBe(403);
+      });
+
+      it('un MIEMBRO tampoco crea actividades', async () => {
+        const res = await request(app.getHttpServer())
+          .post('/api/v1/purchase-book/activities')
+          .set('Authorization', `Bearer ${miembroTokenA}`)
+          .send({ receptorId: receptorV4Id, nombre: 'Intrusa' });
+
+        expect(res.status).toBe(403);
+      });
+
+      it('un ADMIN sí lista, y arranca vacío', async () => {
+        const res = await asAdminA('get', `/purchase-book/activities?receptorId=${receptorV4Id}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data).toEqual([]);
+      });
+
+      it('sin receptorId responde 400: el catálogo es de un solo contribuyente', async () => {
+        const res = await asAdminA('get', '/purchase-book/activities');
+
+        expect(res.status).toBe(400);
+        expect(res.body.message).toContain('receptorId debe ser un UUID válido');
+      });
+
+      it('con un receptorId que no es UUID responde 400', async () => {
+        const res = await asAdminA('get', '/purchase-book/activities?receptorId=el-restaurante');
+        expect(res.status).toBe(400);
+      });
+    });
+
+    describe('siembra', () => {
+      /**
+       * `GET activities/seed` está declarado ANTES que las rutas con `:id`. Si
+       * el orden se invirtiera, Nest intentaría resolver "seed" como parámetro
+       * y el `ParseUUIDPipe` devolvería 400 en vez de la propuesta.
+       */
+      it('la ruta literal activities/seed resuelve la propuesta y no un :id', async () => {
+        const res = await asAdminA(
+          'get',
+          `/purchase-book/activities/seed?receptorId=${receptorV4Id}`,
+        );
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.receptorId).toBe(receptorV4Id);
+        expect(Array.isArray(res.body.data.activities)).toBe(true);
+        expect(Array.isArray(res.body.data.mappings)).toBe(true);
+      });
+
+      it('rechaza aplicar sin confirm: true', async () => {
+        const res = await asAdminA('post', '/purchase-book/activities/seed').send({
+          receptorId: receptorV4Id,
+          confirm: false,
+          activities: [{ nombre: 'Restaurante' }],
+          mappings: [],
+        });
+
+        expect(res.status).toBe(400);
+        expect(res.body.message).toContain(
+          'confirm debe ser true: la siembra escribe el catálogo y el mapeo del contribuyente',
+        );
+      });
+
+      it('rechaza un lote de mapeos por encima del tope', async () => {
+        const res = await asAdminA('post', '/purchase-book/activities/seed').send({
+          receptorId: receptorV4Id,
+          confirm: true,
+          activities: [{ nombre: 'Restaurante' }],
+          mappings: Array.from({ length: SEED_MAX_MAPPINGS + 1 }, () => ({
+            emisorId: emisorV4Id,
+            activityNombre: 'Restaurante',
+          })),
+        });
+
+        expect(res.status).toBe(400);
+      });
+
+      it('propone desde el histórico, aplica, y el catálogo queda escrito', async () => {
+        const propuesta = await asAdminA(
+          'get',
+          `/purchase-book/activities/seed?receptorId=${receptorV4Id}`,
+        );
+        expect(propuesta.status).toBe(200);
+        // El DTE v4 declara `receptor.codActividad` 46900: la propuesta sale de
+        // ahí, no de un catálogo precargado.
+        expect(propuesta.body.data.activities).toEqual([
+          {
+            codActividad: '46900',
+            nombre: 'Venta al por mayor de otros productos',
+            documentCount: 1,
+          },
+        ]);
+        expect(propuesta.body.data.mappings).toHaveLength(1);
+        expect(propuesta.body.data.mappings[0].emisorId).toBe(emisorV4Id);
+
+        const aplicada = await asAdminA('post', '/purchase-book/activities/seed').send({
+          receptorId: receptorV4Id,
+          confirm: true,
+          activities: propuesta.body.data.activities.map(
+            (activity: { nombre: string; codActividad: string }) => ({
+              nombre: activity.nombre,
+              codActividad: activity.codActividad,
+            }),
+          ),
+          mappings: propuesta.body.data.mappings.map(
+            (mapping: { emisorId: string; activityNombre: string }) => ({
+              emisorId: mapping.emisorId,
+              activityNombre: mapping.activityNombre,
+            }),
+          ),
+        });
+
+        expect(aplicada.status).toBe(201);
+        expect(aplicada.body.data).toMatchObject({
+          activitiesCreated: 1,
+          activitiesSkipped: 0,
+          mappingsCreated: 1,
+          mappingsSkipped: 0,
+        });
+
+        const listado = await asAdminA(
+          'get',
+          `/purchase-book/activities?receptorId=${receptorV4Id}`,
+        );
+        expect(listado.status).toBe(200);
+        expect(listado.body.data).toHaveLength(1);
+        expect(listado.body.data[0]).toMatchObject({
+          receptorId: receptorV4Id,
+          nombre: 'Venta al por mayor de otros productos',
+          codActividad: '46900',
+          active: true,
+        });
+        seededActivityId = listado.body.data[0].id;
+      });
+
+      /**
+       * La idempotencia contra una base REAL es lo único que la prueba de
+       * verdad: acá corren el `@@unique([tenantId, receptorId, nombre])` y el
+       * `ON CONFLICT DO NOTHING` del `createMany`, que en los unit tests son un
+       * mock.
+       */
+      it('la segunda aplicación no duplica nada y lo reporta como salteado', async () => {
+        const res = await asAdminA('post', '/purchase-book/activities/seed').send({
+          receptorId: receptorV4Id,
+          confirm: true,
+          activities: [{ nombre: 'Venta al por mayor de otros productos', codActividad: '46900' }],
+          mappings: [
+            { emisorId: emisorV4Id, activityNombre: 'Venta al por mayor de otros productos' },
+          ],
+        });
+
+        expect(res.status).toBe(201);
+        expect(res.body.data).toMatchObject({
+          activitiesCreated: 0,
+          activitiesSkipped: 1,
+          mappingsCreated: 0,
+          mappingsSkipped: 1,
+          skippedActivityNames: ['Venta al por mayor de otros productos'],
+          skippedEmisorIds: [emisorV4Id],
+        });
+
+        const total = await prisma.purchaseActivity.count({
+          where: { tenantId: tenantA.id, receptorId: receptorV4Id },
+        });
+        expect(total).toBe(1);
+      });
+    });
+
+    describe('mapeo y retiro', () => {
+      it('el mapeo del receptor trae al proveedor con su actividad', async () => {
+        const res = await asAdminA(
+          'get',
+          `/purchase-book/supplier-activity-defaults?receptorId=${receptorV4Id}`,
+        );
+
+        expect(res.status).toBe(200);
+        expect(res.body.data).toHaveLength(1);
+        expect(res.body.data[0]).toMatchObject({
+          receptorId: receptorV4Id,
+          emisorId: emisorV4Id,
+          activityId: seededActivityId,
+        });
+        expect(res.body.data[0].documentCount).toBe(1);
+      });
+
+      it('rechaza mapear un proveedor a la actividad de OTRO contribuyente', async () => {
+        // La fuga que el modelo ternario existe para impedir: aplicaría el
+        // criterio del receptor v3 a las compras del receptor v4.
+        const ajena = await asAdminA('post', '/purchase-book/activities').send({
+          receptorId: receptorV3Id,
+          nombre: 'Restaurante del otro contribuyente',
+        });
+        expect(ajena.status).toBe(201);
+
+        const res = await asAdminA('put', '/purchase-book/supplier-activity-defaults').send({
+          receptorId: receptorV4Id,
+          emisorId: emisorV4Id,
+          activityId: ajena.body.data.id,
+        });
+
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe('PURCHASE_ACTIVITY_RECEPTOR_MISMATCH');
+      });
+
+      it('no borra una actividad que el mapeo referencia: manda a desactivarla', async () => {
+        const res = await asAdminA('delete', `/purchase-book/activities/${seededActivityId}`);
+
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe('PURCHASE_ACTIVITY_IN_USE');
+      });
+
+      it('desactivar la retira del listado y includeInactive la vuelve a mostrar', async () => {
+        const baja = await asAdminA(
+          'post',
+          `/purchase-book/activities/${seededActivityId}/deactivate`,
+        );
+        expect(baja.status).toBe(201);
+        expect(baja.body.data.active).toBe(false);
+
+        const visibles = await asAdminA(
+          'get',
+          `/purchase-book/activities?receptorId=${receptorV4Id}`,
+        );
+        expect(visibles.body.data).toEqual([]);
+
+        const todas = await asAdminA(
+          'get',
+          `/purchase-book/activities?receptorId=${receptorV4Id}&includeInactive=true`,
+        );
+        expect(todas.body.data.map((row: { id: string }) => row.id)).toEqual([seededActivityId]);
+      });
+    });
+
+    /**
+     * Las dos tablas nuevas llevan RLS FORCE + policy `tenant_isolation`
+     * escritas a mano en la migración. Estos cuatro casos son la única prueba de
+     * que esas sentencias existen y funcionan: el rol de la app no bypasea RLS.
+     */
+    describe('aislamiento entre tenants', () => {
+      it('el tenant B no lista el catálogo de un receptor del tenant A', async () => {
+        const res = await asAdminB('get', `/purchase-book/activities?receptorId=${receptorV4Id}`);
+
+        // 404 y no 403: para el tenant B ese contribuyente no existe.
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('DTE_PARTY_NOT_FOUND');
+      });
+
+      it('el tenant B no toca una actividad del tenant A', async () => {
+        const res = await asAdminB('patch', `/purchase-book/activities/${seededActivityId}`).send({
+          nombre: 'Secuestrada',
+        });
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('PURCHASE_ACTIVITY_NOT_FOUND');
+
+        const intacta = await prisma.purchaseActivity.findUniqueOrThrow({
+          where: { id: seededActivityId },
+          select: { nombre: true },
+        });
+        expect(intacta.nombre).toBe('Venta al por mayor de otros productos');
+      });
+
+      it('el tenant B no ve el mapeo de proveedores del tenant A', async () => {
+        const res = await asAdminB(
+          'get',
+          `/purchase-book/supplier-activity-defaults?receptorId=${receptorV4Id}`,
+        );
+
+        expect(res.status).toBe(404);
+      });
+
+      it('el catálogo del propio receptor del tenant B está vacío, no ve el de A', async () => {
+        const res = await asAdminB('get', `/purchase-book/activities?receptorId=${receptorBId}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data).toEqual([]);
+      });
     });
   });
 

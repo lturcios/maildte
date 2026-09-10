@@ -82,6 +82,10 @@ model Tenant {
   dteParseResults   DteParseResult[]
   purchaseDocuments PurchaseDocument[]
 
+  // Addendum 11 — fase 3: segmentación por actividad
+  purchaseActivities       PurchaseActivity[]
+  supplierActivityDefaults SupplierActivityDefault[]
+
   @@map("tenants")
 }
 
@@ -348,6 +352,13 @@ model DteParty {
   emisorDocuments   PurchaseDocument[] @relation("DocEmisor")
   receptorDocuments PurchaseDocument[] @relation("DocReceptor")
 
+  // Addendum 11 — fase 3: catálogo de actividades del contribuyente y mapeo
+  // de proveedores. Las tres relaciones apuntan al mismo modelo, así que van
+  // nombradas igual que DocEmisor/DocReceptor.
+  activities                 PurchaseActivity[]        @relation("ActivityReceptor")
+  supplierDefaultsAsReceptor SupplierActivityDefault[] @relation("SupplierDefaultReceptor")
+  supplierDefaultsAsEmisor   SupplierActivityDefault[] @relation("SupplierDefaultEmisor")
+
   /// El `@@unique([tenantId, nit])` NO se reemplaza: convive con el de la clave
   /// canónica (desvío 1 del cierre de la fase 2 del Addendum 11). Tres razones.
   ///
@@ -487,6 +498,44 @@ model PurchaseDocument {
   classifiedById      String?
   classifiedAt        DateTime?
 
+  /// Override de la actividad de la compra (Addendum 11, fase 3, §7.4).
+  ///
+  /// `null` = usar el default por (proveedor, receptor); si tampoco hay, la
+  /// compra queda sin actividad. Es la primera etapa de la resolución en dos
+  /// pasos: la actividad resuelta es la que después elige los defaults Q–T.
+  ///
+  /// Columnas PROPIAS y no reutilizadas: `activityAssignedById` /
+  /// `activityAssignedAt` no son `classifiedById` / `classifiedAt`. Son dos
+  /// decisiones contables distintas, tomadas en momentos distintos —asignar la
+  /// unidad de negocio de una compra no es clasificar sus columnas Q–T—, y
+  /// compartir las columnas de auditoría haría que la segunda pisara el
+  /// registro de quién tomó la primera.
+  ///
+  /// `activityAssignedById` queda sin FK a `users`, igual que `classifiedById`:
+  /// es el registro de quién decidió, y borrar un usuario no puede borrar ni
+  /// bloquear la traza de una decisión contable ya tomada.
+  ///
+  /// `onDelete: Restrict` y NO el `SET NULL` que Prisma pone por defecto en una
+  /// relación opcional. Dos razones, y las dos apuntan al mismo lugar:
+  ///
+  ///   1. Es lo que ya promete la aplicación. `PurchaseActivityService.remove()`
+  ///      rechaza con 422 el borrado de una actividad referenciada por un
+  ///      documento O por el mapeo de un proveedor. Con `SET NULL` esa garantía
+  ///      viviría solo en el servicio para un lado de la pareja, mientras que
+  ///      `supplier_activity_defaults.activityId` sí tiene respaldo en la base:
+  ///      la asimetría dejaba un solo camino sin red.
+  ///   2. `SET NULL` corrompe la auditoría. Borra `activityId` pero conserva
+  ///      `activityAssignedById` / `activityAssignedAt`, o sea la traza de una
+  ///      decisión sobre una actividad que ya no se puede resolver: exactamente
+  ///      lo contrario de lo que dice el comentario de esas dos columnas.
+  ///
+  /// La salida para retirar una actividad en uso es desactivarla (`active`),
+  /// que es la operación que el addendum define para ese caso.
+  activityId           String?
+  activity             PurchaseActivity? @relation("DocActivity", fields: [activityId], references: [id], onDelete: Restrict)
+  activityAssignedById String?
+  activityAssignedAt   DateTime?
+
   parserVersion Int
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -504,6 +553,9 @@ model PurchaseDocument {
   @@index([tenantId, emisorId, fecEmi])
   @@index([tenantId, accountId, fecEmi])
   @@index([tenantId, numeroControl])
+  /// Soporta el lado "override" del filtro por actividad y la guarda de
+  /// referencias que impide borrar una actividad ya usada.
+  @@index([tenantId, activityId])
   @@map("purchase_documents")
 }
 
@@ -566,4 +618,129 @@ model PurchaseDocumentPayment {
   @@unique([documentId, position])
   @@index([tenantId])
   @@map("purchase_document_payments")
+}
+
+// =============================================================
+// Addendum 11 — fase 3: segmentación por actividad
+//
+// La actividad de una compra NO es el `receptorCodActividad` que trae el DTE:
+// ese código lo declara el proveedor y se conserva solo como dato informativo
+// para prellenar el mapeo (§7.4). La actividad efectiva se resuelve en dos
+// etapas, con la MISMA precedencia que las columnas Q–T:
+//
+//   actividad = override del documento > default por (proveedor, receptor) > sin clasificar
+//   Q–T       = override del documento > default de la actividad resuelta
+//               > default del receptor > sin clasificar
+//
+// Las dos tablas llevan tenantId y RLS FORCE + policy tenant_isolation,
+// escritas a mano en la migración (Prisma no las genera).
+// =============================================================
+
+/// Catálogo de actividades económicas de UN contribuyente (Addendum 11, fase 3).
+///
+/// El contador ve "Restaurante"; el sistema conserva el CIIU para prellenar el
+/// mapeo y para contrastar contra lo que declaran los proveedores.
+model PurchaseActivity {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  /// El catálogo pertenece a un solo contribuyente. Un catálogo global al
+  /// tenant mezclaría las unidades de negocio de un receptor con las de otro,
+  /// que es el mismo error de forma que un export con dos receptores (regla 31
+  /// de CLAUDE.md).
+  receptorId String
+  receptor   DteParty @relation("ActivityReceptor", fields: [receptorId], references: [id])
+
+  /// Identidad de la actividad: el nombre que le puso el contribuyente. Es lo
+  /// que declara el `@@unique` de más abajo.
+  nombre String
+
+  /// Código CIIU, deliberadamente NO único y anulable.
+  ///
+  /// NO único: dos locales del mismo rubro son dos unidades de negocio
+  /// distintas con el mismo código CIIU. El código es una pista para prellenar
+  /// el mapeo, no una identidad; el que identifica es el nombre.
+  ///
+  /// Anulable: el contador puede crear una actividad que no corresponde a
+  /// ningún código visto en los DTE, y forzarlo a inventar un código sería
+  /// exactamente lo que prohíbe la regla 30 de CLAUDE.md para las columnas Q–T.
+  codActividad String?
+
+  /// Retiro de una actividad sin romper lo que la referencia. Ver
+  /// `PurchaseActivityService.remove()`: un DELETE deja el mapeo de proveedores
+  /// apuntando al vacío, así que una actividad referenciada se desactiva.
+  ///
+  /// Se llama `active` y no `activo` por la regla 23 de CLAUDE.md: los
+  /// identificadores van en inglés. Es además el nombre que ya usan `Tenant` y
+  /// `MailProvider` para este mismo concepto. Los términos del dominio fiscal
+  /// (`nombre`, `codActividad`, `receptorId`) sí conservan el español porque son
+  /// el vocabulario del DTE, no una decisión de estilo.
+  active Boolean @default(true)
+
+  /// Defaults del Anexo 3 (columnas Q, R, S, T) de esta actividad. Se
+  /// interponen entre el override del documento y el default del receptor.
+  /// Su consumo desde `resolveClassification()` es una rebanada posterior.
+  defaultTipoOperacion  Int?
+  defaultClasificacion  Int?
+  defaultSector         Int?
+  defaultTipoCostoGasto Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  supplierDefaults SupplierActivityDefault[]
+  documents        PurchaseDocument[]        @relation("DocActivity")
+
+  @@unique([tenantId, receptorId, nombre])
+  @@index([tenantId])
+  /// Listado del catálogo de un receptor, con y sin las desactivadas.
+  @@index([tenantId, receptorId, active])
+  @@map("purchase_activities")
+}
+
+/// Actividad por defecto de un proveedor para UN receptor (Addendum 11, §7.4).
+///
+/// Son las ~30 filas que hacen viable la carga inicial: cubren el histórico
+/// completo y todo lo que venga de esos mismos proveedores. El override del
+/// documento corrige el resto.
+///
+/// **Es una relación ternaria y por eso NO puede ser un campo del `DteParty`
+/// del emisor.** El mismo distribuidor le vende a varios contribuyentes del
+/// mismo buzón y a cada uno le sirve una unidad de negocio distinta. Un campo
+/// colgado del emisor sería global al tenant y aplicaría el criterio de un
+/// contribuyente a las compras de otro: el mismo error de forma que un export
+/// mezclando receptores (regla 31 de CLAUDE.md), con la misma consecuencia.
+model SupplierActivityDefault {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+
+  receptorId String
+  receptor   DteParty @relation("SupplierDefaultReceptor", fields: [receptorId], references: [id])
+  emisorId   String
+  emisor     DteParty @relation("SupplierDefaultEmisor", fields: [emisorId], references: [id])
+
+  activityId String
+  activity   PurchaseActivity @relation(fields: [activityId], references: [id])
+
+  /// Quién definió el mapeo y cuándo, con la misma forma que
+  /// `classifiedById` / `classifiedAt` de `PurchaseDocument`: es una decisión
+  /// contable y tiene que quedar la traza. Sin FK a `users`, por lo mismo que
+  /// aquellas.
+  assignedById String?
+  assignedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Un proveedor tiene un solo default por receptor. Es lo que hace idempotente
+  /// la aplicación de la siembra.
+  @@unique([tenantId, receptorId, emisorId])
+  @@index([tenantId])
+  /// Resolución de la actividad efectiva: dado un receptor, el mapeo de sus
+  /// proveedores. Con `activityId` al final sirve además para la guarda de
+  /// referencias antes de borrar una actividad.
+  @@index([tenantId, receptorId, activityId])
+  @@map("supplier_activity_defaults")
 }
