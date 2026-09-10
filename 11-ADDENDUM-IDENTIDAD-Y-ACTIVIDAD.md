@@ -1,6 +1,8 @@
 # Addendum 11 — Identidad del contribuyente y segmentación por actividad económica
 
-**Estado:** borrador para revisión. No implementado.
+**Estado (2026-09-10):** fase 1 **desplegada en producción** y con su gate cerrado. Fase 2 en curso:
+puntos 5 y 2 implementados, faltan 3 (fusión), 4 (vista de confirmación) y 1 (constraint). Fase 3
+**bloqueada** por la §7.4. Fase 4 sin empezar.
 **Origen:** dos hallazgos en el primer despliegue del Addendum 10 en producción (2026-09-09).
 **Depende de:** Addendum 10 (libro de compras), ya en `main`.
 
