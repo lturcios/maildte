@@ -1437,6 +1437,127 @@ el despliegue. Si aparece un grupo nuevo con `partes > 1`, la ingesta está
 creando filas por identificador y hay que revisar `upsertParty()` antes de
 correr la fusión.
 
+### 9.d Fusión de contribuyentes partidos (Addendum 11, fase 2 punto 3)
+
+Cierra el problema que originó el addendum: el mismo contribuyente quedó como
+dos filas de `dte_parties` porque unos proveedores lo identifican con el NIT de
+14 dígitos y otros con el homologado al DUI de 9. El §9.c cerró la **fuente**
+—la ingesta ya no crea partes nuevas partidas—, pero **el histórico no se
+fusiona solo**: mientras siga partido, el export del Anexo 3 de ese receptor
+está bloqueado con `PURCHASE_BOOK_SPLIT_RECEPTOR`, que es el aviso, no el
+arreglo.
+
+**Es un cambio contable y se confirma a mano.** El NRC compartido es evidencia
+fuerte, no prueba: el script reasigna documentos y borra filas, así que el
+ensayo con `--dry-run` no es opcional. `--dry-run` es además el **default**, y
+la fusión real exige `--apply`.
+
+**No hace falta ventana de servicio ni parar el worker.** Cada grupo se fusiona
+en su propia transacción y el script solo toca `dte_parties` y las columnas
+`receptorId` / `emisorId` de `purchase_documents`: no encola nada, no toca IMAP,
+no toca `lastUid` y no toca el storage. Aun así conviene correrlo en un momento
+de poco movimiento, para que la lista de grupos que se revisa a mano sea la
+misma que se aplica.
+
+Antes de empezar, sacar la lista de grupos a fusionar con la **segunda consulta
+del §9.b** (contribuyentes partidos). Es la que el script va a encontrar.
+
+Corre **en el host**, no dentro del contenedor, por la misma razón y con el
+mismo modo de falla que el §9.b (la imagen de producción no trae `ts-node` ni
+`pnpm`). A diferencia del backfill, **no necesita Redis**: le alcanza con
+`APP_DATABASE_URL`.
+
+```bash
+cd /opt/maildte
+pnpm install                 # dispara el postinstall que regenera el cliente Prisma
+pnpm exec prisma generate    # explícito, por si el postinstall no corrió
+
+# 1. Ensayo: reporta qué fusionaría, sin escribir nada
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte pnpm run merge:dte-parties -- --tenant=wendy-cocar --dry-run
+
+# 2. La corrida de verdad, sobre el mismo tenant ya revisado
+APP_DATABASE_URL=postgresql://maildte_app:<contraseña>@127.0.0.1:5433/maildte pnpm run merge:dte-parties -- --tenant=wendy-cocar --apply
+```
+
+Salida del ensayo, un bloque por grupo:
+
+```
+Fusión de partes por identidad canónica — tenant wendy-cocar, --dry-run (no se aplica nada)
+
+  tenant wendy-cocar
+    JOSE WALTER CRUZ MARAVILLA  nrc 1435153
+      canónica : 11022205761034  (849 documentos)
+      absorbe  : 022560911       (7 documentos)   -> 856 tras fusionar
+  ------------------------------------------------------------------
+  1 tenant, 1 grupo, 2 partes -> 1, 7 documentos reasignados
+```
+
+Cómo se lee cada bloque, y qué mirar **antes** de `--apply`:
+
+| Línea | Qué dice |
+|---|---|
+| `nrc 1435153` | De qué rama de la cascada (§2 del addendum) salió la clave con la que se agrupó: `nrc`, `nit` o `dui`. |
+| `canónica` | La parte que sobrevive: **la que más documentos tiene**, sumando los dos roles (emisor y receptor). Con empate gana la de `createdAt` más antiguo. Conserva su `nit`. |
+| `absorbe` | La parte que se borra. Sus documentos pasan a la canónica y sus identificadores (`dui`, `nrc`) la completan **solo si están vacíos**: nunca se pisa uno ya presente. |
+| `CONFLICTO` | Los defaults Q–T de las partes no coinciden. Gana el bloque **completo** de la parte con más documentos y el otro se descarta; las cuatro columnas nunca se mezclan entre partes. Revisar la clasificación del receptor en el panel después de fusionar. |
+| `AVISO` | Los nombres no coinciden entre las partes. Es la señal de que quizá **no** sean el mismo contribuyente: verificar contra la lista del §9.b antes de aplicar. |
+
+Con `--apply`, cada parte absorbida imprime además su **contenido completo**
+(`BORRADA <nit> (id …)` y todas sus columnas) antes de desaparecer. Es el único
+registro que queda de esa fila: si la corrida es larga, guardarla con `tee`.
+
+Notas de uso:
+
+- **`--dry-run` es el default.** Sin `--apply` no se escribe nada, ni siquiera
+  parcialmente.
+- `--apply` y `--dry-run` juntos son un **error**, no una precedencia: en una
+  herramienta que borra filas, adivinar cuál gana es peor que fallar.
+- `--tenant=<slug o id>` acota a un tenant. **Recomendado para la primera
+  corrida.** Sin él recorre todos, incluidos los tenants que no están `ACTIVO`:
+  la fusión es una corrección de integridad de datos ya escritos y el
+  `@@unique([tenantId, canonicalKey])` que cierra la fase se aplica a todas las
+  filas de la tabla, así que saltear un tenant suspendido dejaría duplicados que
+  harían fallar esa migración.
+- **Es seguro repetirlo.** La segunda corrida no encuentra grupos: las hermanas
+  ya no existen y la ingesta resuelve todo a la canónica.
+- **Una transacción por grupo.** Un grupo que falla se revierte entero (queda
+  como estaba, no fusionado a medias), el resto del tenant sigue, y su bloque lo
+  dice: `ERROR  el grupo no se fusionó (sin cambios): …`.
+- Un tenant que no se puede enumerar sale como `tenant <slug>  ERROR: …` y la
+  corrida sigue con el siguiente. Cualquier error, de grupo o de tenant, termina
+  el proceso con **código de salida distinto de cero**.
+- La salida se imprime **a medida que avanza**: lo que ya está en pantalla es
+  trabajo hecho aunque la corrida se corte después. Correrlo dentro de `tmux` si
+  hay muchos grupos.
+
+#### Verificación posterior
+
+```bash
+# 1. No debe quedar ningún canonicalKey con más de una parte.
+#    Cero filas es la condición que habilita el @@unique del cierre de la fase.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT \"tenantId\", \"canonicalKey\", count(*)
+    FROM dte_parties
+    GROUP BY \"tenantId\", \"canonicalKey\"
+    HAVING count(*) > 1;
+  "
+
+# 2. El total de documentos del contribuyente no cambió: 856 en el caso de
+#    arriba (849 + 7), el mismo número que imprimió "tras fusionar".
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT count(*) FROM purchase_documents WHERE \"receptorId\" = '<id de la canónica>';
+  "
+```
+
+El `<id de la canónica>` sale de la consulta del gate del §9.b, o del bloque
+`BORRADA` de la corrida (la canónica es la parte que **no** aparece ahí).
+
+Comprobación funcional: exportar el Anexo 3 de ese receptor desde el panel. Si
+sigue devolviendo `PURCHASE_BOOK_SPLIT_RECEPTOR`, la fusión no se aplicó (¿faltó
+el `--apply`?) o quedó otro grupo con la misma clave.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y

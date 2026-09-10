@@ -30,7 +30,8 @@
     "seed:superadmin": "ts-node scripts/seed-superadmin.ts",
     "seed:mail-providers": "ts-node scripts/seed-mail-providers.ts",
     "migrate:to-multitenant": "ts-node scripts/migrate-to-multitenant.ts",
-    "backfill:purchase-book": "ts-node scripts/backfill-purchase-book.ts"
+    "backfill:purchase-book": "ts-node scripts/backfill-purchase-book.ts",
+    "merge:dte-parties": "ts-node scripts/merge-dte-parties.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
