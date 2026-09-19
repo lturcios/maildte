@@ -368,22 +368,36 @@ export function ActividadesPage() {
               </div>
             )}
           </section>
-
-          {/*
-            Montado solo mientras está abierto: así cada apertura pide la
-            propuesta de nuevo y el borrador de fusiones nace limpio. Dejarlo
-            montado arrastraría las decisiones de la sesión anterior, o peor,
-            las de otro contribuyente.
-          */}
-          {seedOpen && (
-            <ActivitySeedDialog
-              receptorId={receptorId}
-              receptorNombre={receptor.nombre}
-              open
-              onOpenChange={setSeedOpen}
-            />
-          )}
         </>
+      )}
+
+      {/*
+        FUERA del bloque de arriba a propósito.
+
+        Adentro, el diálogo colgaba del mismo guard que el resto de la pantalla
+        (`!loading && !error && receptor`). Cualquiera de esas tres condiciones
+        que se pusiera falsa lo DESMONTABA en silencio mientras `seedOpen`
+        seguía en true, y el botón quedaba muerto hasta que algo revivía el
+        guard. Es lo que se observó: primer clic sin efecto, y al salir del
+        módulo y volver a entrar funcionaba — porque volver a elegir el
+        contribuyente dispara `load()`, que limpia `error`.
+
+        Dos caminos reales lo disparan: `error` solo se limpia en el siguiente
+        `load()`, y `receptor` sale de OTRO store (dte-parties), que se vacía en
+        cualquier reset de sesión. El diálogo no necesita ninguno de los dos: le
+        alcanza con el `receptorId`, que es lo único que manda a la API.
+
+        Sigue montándose solo mientras está abierto, que es lo que hace que cada
+        apertura pida la propuesta de nuevo y el borrador de fusiones nazca
+        limpio.
+      */}
+      {seedOpen && receptorId && (
+        <ActivitySeedDialog
+          receptorId={receptorId}
+          receptorNombre={receptor?.nombre ?? 'este contribuyente'}
+          open
+          onOpenChange={setSeedOpen}
+        />
       )}
     </div>
   );
