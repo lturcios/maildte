@@ -481,7 +481,33 @@ export interface AnexoOverrides {
 }
 
 /** Fila del listado del libro (GET /purchase-book/documents). */
-export interface PurchaseDocumentListItem extends AnexoOverrides {
+/**
+ * Actividad EFECTIVA de una compra, ya resuelta por el backend
+ * (Addendum 11, §7.4): `override del documento > default del proveedor > sin
+ * clasificar`.
+ *
+ * Viaja el ORIGEN y no solo el valor, y eso no es decorativo: "heredado del
+ * proveedor" se corrige mapeando el proveedor UNA vez, mientras que un override
+ * hay que tocarlo documento a documento. Son dos acciones distintas y el
+ * contador necesita saber cuál está mirando.
+ */
+export type ActivitySource = 'override' | 'supplier-default' | 'missing';
+
+export interface ResolvedActivity {
+  activityId: string | null;
+  source: ActivitySource;
+  activity: PurchaseActivityRef | null;
+}
+
+/** Traza de quién asignó la actividad de una compra y cuándo. */
+export interface DocumentActivityFields {
+  activityId: string | null;
+  activityAssignedById: string | null;
+  activityAssignedAt: string | null;
+  resolvedActivity: ResolvedActivity | null;
+}
+
+export interface PurchaseDocumentListItem extends AnexoOverrides, DocumentActivityFields {
   id: string;
   fecEmi: string;
   tipoDte: string;
@@ -539,7 +565,7 @@ export interface PurchaseDocumentPayment {
 }
 
 /** Detalle completo (GET /purchase-book/documents/:id). */
-export interface PurchaseDocumentDetail extends AnexoOverrides {
+export interface PurchaseDocumentDetail extends AnexoOverrides, DocumentActivityFields {
   id: string;
   attachmentId: string;
   emailId: string;
