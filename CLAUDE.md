@@ -82,6 +82,23 @@ pnpm --dir web build
 pnpm --dir web dev
 ```
 
+### e2e con los puertos ocupados
+
+Por defecto la suite e2e se conecta a `localhost:5433` (Postgres) y
+`localhost:6379` (Redis), que es lo que publica `docker-compose.yml`. Si otro
+proyecto ya tiene esos puertos tomados, se levanta MailDTE en 5434/6380 con el
+override de puertos y se apunta la suite ahí — sin tocar `docker-compose.yml`
+ni `test/e2e-connection.ts`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml up -d
+E2E_POSTGRES_PORT=5434 E2E_REDIS_PORT=6380 pnpm test:e2e
+```
+
+Variables disponibles: `E2E_POSTGRES_HOST`, `E2E_POSTGRES_PORT`,
+`E2E_REDIS_HOST`, `E2E_REDIS_PORT`. Sin ellas, el comportamiento es el de
+siempre.
+
 ## Definición de terminado (DoD) por tarea
 1. Compila con `pnpm build` sin warnings de TS.
 2. `pnpm lint` limpio.

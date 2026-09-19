@@ -159,6 +159,18 @@ describe('PurchaseActivityService', () => {
       expect(prismaMock.withTenant).not.toHaveBeenCalled();
     });
 
+    it('404 al listar el catálogo de un receptor de otro tenant, no 200 con lista vacía', async () => {
+      // Un 200 vacío es indistinguible de un contribuyente propio sin
+      // actividades cargadas, y deja al listado como la única entrada del
+      // módulo que acepta nombrar a un contribuyente ajeno sin decirlo.
+      prismaMock.dteParty.findFirst.mockResolvedValue(null);
+
+      await expect(service.findAll(adminCtx, listDto({ receptorId: RECEPTOR_B }))).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(prismaMock.purchaseActivity.findMany).not.toHaveBeenCalled();
+    });
+
     it('404 si la actividad es de otro tenant', async () => {
       prismaMock.purchaseActivity.findFirst.mockResolvedValue(null);
       await expect(service.update(adminCtx, ACTIVITY_ID, { nombre: 'X' })).rejects.toThrow(

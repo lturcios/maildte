@@ -1,9 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
 
-const ADMIN_URL = 'postgresql://maildte:secret@localhost:5433/maildte';
-const TEST_DB_NAME = 'maildte_test';
-const TEST_URL = `postgresql://maildte:secret@localhost:5433/${TEST_DB_NAME}`;
+import { ADMIN_URL, TEST_DB_NAME, TEST_URL } from './e2e-connection';
 
 /** Crea la BD de test (si no existe) y aplica las migraciones. Corre una sola vez antes de toda la suite e2e. */
 export default async function globalSetup(): Promise<void> {

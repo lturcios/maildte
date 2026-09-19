@@ -81,14 +81,22 @@ export class PurchaseActivityService {
       }
     }
 
-    return this.prisma.withTenant(tenantId, (tx) =>
-      tx.purchaseActivity.findMany({
+    return this.prisma.withTenant(tenantId, async (tx) => {
+      // El receptor se comprueba también acá, no solo en las escrituras. Sin
+      // esto, pedir el catálogo de un contribuyente ajeno devuelve 200 con
+      // lista vacía —indistinguible de un contribuyente propio sin actividades
+      // cargadas— en vez del 404 que devuelve el resto del módulo. RLS y el
+      // `tenantId` del `where` ya impiden la fuga de filas; lo que falta es la
+      // respuesta correcta.
+      await assertReceptorExists(tx, tenantId, dto.receptorId);
+
+      return tx.purchaseActivity.findMany({
         where,
         select: ACTIVITY_SELECT,
         orderBy: [{ active: 'desc' }, { nombre: 'asc' }],
         take: dto.limit,
-      }),
-    );
+      });
+    });
   }
 
   async create(ctx: TenantContext, dto: CreatePurchaseActivityDto): Promise<PurchaseActivityRow> {
