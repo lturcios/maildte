@@ -2219,6 +2219,201 @@ Nada de lo hecho acá toca producción: la siembra se aplicó sobre la copia. Pa
 sembrar de verdad, el contador usa el panel contra el sistema real, que es el
 §9.f punto 5.
 
+### 9.h Despliegue de la fase 3 completa: actividad efectiva y panel (Addendum 11)
+
+El §9.f cubre el **esquema** del catálogo de actividad, y sigue vigente: no hay
+migraciones nuevas. Lo que falta documentar es todo lo que llegó después —la
+actividad efectiva de cada compra, el panel del catálogo y el cableado en el
+libro—, porque cuando se escribió el §9.f nada de eso existía.
+
+Qué entra con este despliegue:
+
+| Superficie | Qué cambia |
+|---|---|
+| API | `PATCH /purchase-book/documents/:id/activity` (override por compra) |
+| API | Filtro `activityId` en `/documents` y `/documents/summary`, con el literal `none` |
+| API | `resolvedActivity` en cada fila del listado y en el detalle |
+| API | `GET /purchase-book/activities` devuelve **404** para un receptor ajeno, ya no 200 vacío |
+| API | Un `passwordHash` ilegible en `users` devuelve **401** en el login, ya no 500 |
+| Panel | Ruta nueva `/panel/libro-compras/actividades` |
+| Panel | Columna y filtro de actividad en `/panel/libro-compras`, y el selector en el detalle |
+
+**Sin migraciones, sin backfill, sin bump de `PARSER_VERSION`, sin tocar el
+worker y sin ventana de servicio** — con una salvedad: si el §9.f nunca se
+ejecutó en esta instalación, la migración del catálogo se aplica *ahora*, y ahí
+sí aplica todo lo que dice el §9.f punto 1 sobre el lock de
+`purchase_documents`. El punto 1 de abajo lo resuelve en una consulta.
+
+#### 1. Verificación PREVIA
+
+```bash
+cd /opt/maildte
+
+# 1. ¿Ya está aplicada la migración del catálogo de actividad?
+#    - Fila con `finished_at` cargado y `rolled_back_at` NULL -> ya está: este
+#      despliegue no toca el esquema y es puro cambio de código.
+#    - SIN fila -> se va a aplicar ahora: leer el §9.f punto 1 (lock sobre
+#      purchase_documents) y elegir el momento con esa información.
+#    - Con `rolled_back_at` cargado o sin `finished_at` -> quedó a medias:
+#      resolver ESO primero (§9.f punto 6). `migrate deploy` no va a avanzar.
+docker compose -f docker-compose.prod.yml exec postgres \
+  psql -U maildte -d maildte -c "
+    SELECT migration_name, finished_at, rolled_back_at
+    FROM _prisma_migrations
+    WHERE migration_name = '20260910120000_addendum_11_fase_3_catalogo_actividad';
+  "
+
+# 2. Versión actual, para saber a dónde volver si hay que revertir.
+git rev-parse --short HEAD
+```
+
+#### 2. Aplicar — la API primero, el panel después
+
+**El orden importa y no es simétrico.** El panel nuevo llama a endpoints que la
+API vieja no tiene: publicarlo antes deja la pantalla de Actividades
+respondiendo 404 a todo. Al revés no rompe nada — la API expone endpoints que
+todavía nadie llama.
+
+```bash
+cd /opt/maildte
+git pull
+
+# 2.a API y worker. El servicio `api` corre `prisma migrate deploy` al arrancar.
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml logs -f api | head -40
+# Si el esquema ya estaba: "No pending migrations to apply."
+# Si no estaba:            "The following migration(s) have been applied"
+
+# 2.b Panel. El bundle tiene una ruta nueva: NO alcanza con reconstruir la API.
+cd web && pnpm install && pnpm build     # deja el bundle en web/dist
+```
+
+Copiar `web/dist` a donde lo sirva el reverse proxy bajo `/panel`, igual que en
+el §2.c punto 5.
+
+**El worker se reconstruye con el mismo comando y no hace falta pararlo.**
+Comparte imagen con la API, pero ningún camino de esta entrega pasa por él: la
+actividad no interviene en la sincronización ni en el parseo de DTE.
+
+#### 3. Verificación POSTERIOR
+
+```bash
+API=https://<host>/api/v1
+TOKEN=<accessToken de un ADMIN del tenant>
+RECEPTOR=<id de un receptor, de /purchase-book/parties?role=RECEPTOR>
+
+# 1. La actividad efectiva viaja con cada compra. `resolvedActivity` tiene que
+#    existir en toda fila: con el catálogo vacío es `source: "missing"`, que es
+#    una respuesta válida, no un error.
+curl -s "$API/purchase-book/documents?receptorId=$RECEPTOR&limit=1" \
+  -H "Authorization: Bearer $TOKEN" | jq '.data[0].resolvedActivity'
+# -> {"activityId":null,"source":"missing","activity":null}
+
+# 2. El filtro por actividad responde. `none` exige el receptor a propósito: el
+#    mapeo de proveedores es por contribuyente.
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "$API/purchase-book/documents?receptorId=$RECEPTOR&activityId=none" \
+  -H "Authorization: Bearer $TOKEN"
+# -> 200
+curl -s -o /dev/null -w '%{http_code}\n' \
+  "$API/purchase-book/documents?activityId=none" \
+  -H "Authorization: Bearer $TOKEN"
+# -> 404  (sin receptor no hay respuesta posible, y decirlo es mejor que
+#          devolver el libro entero como si el filtro hubiera aplicado)
+
+# 3. El aislamiento del catálogo: un receptor que NO es de este tenant tiene que
+#    dar 404, no 200 con lista vacía. Es el arreglo que trajo el PR #9.
+curl -s "$API/purchase-book/activities?receptorId=00000000-0000-0000-0000-000000000000" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.error'
+# -> DTE_PARTY_NOT_FOUND
+
+# 4. La ruta del override existe. Sin body válido responde 400, que es
+#    exactamente lo que confirma que el endpoint está montado.
+curl -s -o /dev/null -w '%{http_code}\n' -X PATCH \
+  "$API/purchase-book/documents/00000000-0000-0000-0000-000000000000/activity" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}'
+# -> 400  (un 404 acá significaría que la ruta no se montó)
+```
+
+En el panel, con un usuario **ADMIN**:
+
+1. **Libro de compras → Actividades** abre y carga el selector de contribuyente.
+   Si la ruta da un 404 del reverse proxy, el bundle no se republicó (paso 2.b).
+2. Elegir un contribuyente → **Sembrar desde las compras** muestra la propuesta.
+   Es de solo lectura: mirarla no escribe nada.
+3. En **Libro de compras**, la tabla tiene la columna **Actividad** y el panel de
+   filtros tiene el select **Actividad**, deshabilitado hasta elegir receptor.
+4. Abrir una compra: el panel lateral tiene la sección **Actividad económica**.
+
+Con un usuario **MIEMBRO**: ve la columna de actividad, **no** ve el filtro y en
+el detalle ve el valor sin selector. El catálogo es criterio contable, igual que
+la clasificación Q–T.
+
+**Los dos endpoints de siembra tienen throttle propio**: `GET activities/seed`
+20 por minuto y `POST activities/seed` 5 por minuto. Un `429` durante la
+verificación no es un fallo del despliegue.
+
+#### 4. Qué mirar en los logs
+
+El servicio nuevo loguea la siembra con su contexto:
+
+```bash
+docker compose -f docker-compose.prod.yml logs api \
+  | jq -c 'select(.context == "PurchaseActivitySeedService")'
+# -> {"receptorId":"...","actividades":4,"mapeos":30,"sinActividad":0,
+#     "msg":"Propuesta de siembra de actividades calculada"}
+```
+
+Y una línea que **no debería aparecer nunca**:
+
+```bash
+docker compose -f docker-compose.prod.yml logs api \
+  | jq -c 'select(.context == "PasswordService")'
+```
+
+Si aparece, hay una fila de `users` con el `passwordHash` dañado: ese usuario no
+puede entrar y su login responde 401 como cualquier credencial equivocada. El
+log trae `userId` y `tenantId` para encontrarla; nunca el hash ni la contraseña.
+Antes de esta entrega ese caso devolvía un 500 y no dejaba rastro.
+
+#### 5. Primer uso, y una advertencia contable
+
+La siembra **escribe** el catálogo y el mapeo del contribuyente, así que la hace
+el contador desde el panel, no se dispara a ciegas en el despliegue.
+
+Y lo que hay que decirle antes de que la use: la propuesta trae **una actividad
+por cada código que declararon los proveedores**, y eso casi nunca son
+actividades distintas. El código lo elige el emisor y responde "cómo está
+inscripto el comprador", no "a qué negocio va esta compra". Sobre el
+contribuyente conocido, cuatro propuestas eran **un solo restaurante con cuatro
+etiquetas**. Hay que **fusionar** las que son lo mismo y **descartar** las que no
+sirven ANTES de aplicar; el diálogo lo permite y resume qué va a quedar.
+
+Aplicar la propuesta tal cual parte el libro en pedazos sin significado
+contable. No rompe nada —se puede corregir—, pero es trabajo al pedo.
+
+La siembra es **idempotente**: una segunda corrida no duplica nada y reporta lo
+que salteó.
+
+#### Rollback
+
+No hay esquema que revertir: esta entrega no trae migraciones. Revertir es
+volver la imagen y el bundle a la versión anterior.
+
+```bash
+cd /opt/maildte
+git checkout <el commit del punto 1.2>
+docker compose -f docker-compose.prod.yml up -d --build
+cd web && pnpm install && pnpm build   # y republicar web/dist
+```
+
+**Lo que ya se haya sembrado NO se pierde y no estorba.** Las actividades, el
+mapeo de proveedores y los overrides por documento quedan en la base; el código
+viejo no los mira. La sincronización, la lectura de DTE y el export del Anexo 3
+siguen igual: las columnas Q–T se resuelven todavía por override del documento y
+default del receptor, que es lo que hacían antes y lo que esta entrega **no**
+cambió. Lo único que se pierde al revertir es el acceso.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y
