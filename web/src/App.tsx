@@ -5,6 +5,7 @@ import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
 import { SuperadminRoute } from '@/components/layout/SuperadminRoute';
 import { TenantRoute } from '@/components/layout/TenantRoute';
 import { Toaster } from '@/components/ui/sonner';
+import { ActividadesPage } from '@/pages/ActividadesPage';
 import { CorreosPage } from '@/pages/CorreosPage';
 import { CuentasPage } from '@/pages/CuentasPage';
 import { DashboardPage } from '@/pages/DashboardPage';
@@ -34,6 +35,7 @@ function App() {
               <Route path="logs" element={<LogsPage />} />
               <Route path="libro-compras" element={<LibroComprasPage />} />
               <Route path="libro-compras/receptores" element={<ReceptoresPage />} />
+              <Route path="libro-compras/actividades" element={<ActividadesPage />} />
             </Route>
             <Route element={<SuperadminRoute />}>
               <Route path="organizaciones" element={<OrganizacionesPage />} />

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { SlidersHorizontalIcon } from 'lucide-react';
+import { LayersIcon, SlidersHorizontalIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { apiGet, ApiError } from '@/lib/api-client';
@@ -260,6 +260,13 @@ export function LibroComprasPage() {
           >
             <SlidersHorizontalIcon className="size-4" aria-hidden="true" />
             Clasificación por receptor
+          </Link>
+          <Link
+            to="/libro-compras/actividades"
+            className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border px-4 text-sm font-medium hover:bg-accent"
+          >
+            <LayersIcon className="size-4" aria-hidden="true" />
+            Actividades
           </Link>
           {isAdmin && (
             <ReprocessButton

@@ -103,7 +103,7 @@ async function refreshAccessToken(): Promise<string> {
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   body?: unknown;
   /** Evita el interceptor de 401 (usado por /auth/login y /auth/refresh). */
@@ -182,6 +182,16 @@ export function apiPost<T>(path: string, body?: unknown, skipAuthRetry = false):
 
 export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return request<T>({ method: 'PATCH', path, body });
+}
+
+/**
+ * PUT para los recursos que la API define como idempotentes por su clave
+ * natural en vez de por un id propio, como el default de actividad de un
+ * proveedor (`PUT /purchase-book/supplier-activity-defaults`): definirlo y
+ * cambiarlo son la misma operación sobre la terna (tenant, receptor, emisor).
+ */
+export function apiPut<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>({ method: 'PUT', path, body });
 }
 
 export function apiDelete(path: string): Promise<void> {
