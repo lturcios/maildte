@@ -9,3 +9,17 @@ import '@testing-library/jest-dom/vitest';
 // stubs mínimos para que el navegador simulado no rompa el flujo.
 URL.createObjectURL = () => 'blob:maildte-test';
 URL.revokeObjectURL = () => undefined;
+
+// jsdom tampoco implementa la Pointer Events API ni `scrollIntoView`, y los
+// componentes de Radix que abren un panel flotante (Select, Dropdown) las
+// llaman al recibir el click. Sin estos stubs, cualquier test que abra un
+// `<Select>` muere con "target.hasPointerCapture is not a function" — un fallo
+// del navegador simulado, no del componente.
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.setPointerCapture = () => undefined;
+  Element.prototype.releasePointerCapture = () => undefined;
+}
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => undefined;
+}

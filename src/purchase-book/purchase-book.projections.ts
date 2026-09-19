@@ -57,6 +57,15 @@ export const DOCUMENT_LIST_SELECT = {
   anexoTipoCostoGasto: true,
   anexoNota: true,
   createdAt: true,
+  // Addendum 11, fase 3 rebanada 2: el override y las dos claves del mapeo.
+  // `emisorId` y `receptorId` viajan aunque la pantalla no los muestre porque
+  // son la clave ternaria del default del proveedor: sin ellos, resolver la
+  // actividad efectiva de la página exigiría una consulta por fila.
+  activityId: true,
+  activityAssignedById: true,
+  activityAssignedAt: true,
+  emisorId: true,
+  receptorId: true,
   emisor: { select: { id: true, nombre: true, nit: true } },
   receptor: { select: { id: true, nombre: true, nit: true, ...PARTY_DEFAULTS_SELECT } },
 } satisfies Prisma.PurchaseDocumentSelect;
@@ -153,6 +162,14 @@ export const DOCUMENT_DETAIL_SELECT = {
   anexoNota: true,
   classifiedById: true,
   classifiedAt: true,
+  // Addendum 11, fase 3 rebanada 2. Columnas PROPIAS y no reutilizadas: la
+  // actividad y las columnas Q-T son dos decisiones contables distintas,
+  // tomadas en momentos distintos y por quien pudo no ser la misma persona.
+  activityId: true,
+  activityAssignedById: true,
+  activityAssignedAt: true,
+  emisorId: true,
+  receptorId: true,
   parserVersion: true,
   createdAt: true,
   updatedAt: true,
@@ -232,6 +249,22 @@ export const SUPPLIER_ACTIVITY_DEFAULT_SELECT = {
   emisor: { select: { id: true, nit: true, nombre: true } },
   activity: { select: { id: true, nombre: true, codActividad: true, active: true } },
 } satisfies Prisma.SupplierActivityDefaultSelect;
+
+/**
+ * La actividad tal como viaja ADJUNTA a un documento: lo justo para rotularla
+ * en pantalla. No lleva los defaults Q-T ni las fechas — un listado de 200
+ * documentos repetiría el mismo catalogo 200 veces sin que nadie lo mire.
+ */
+export const ACTIVITY_REF_SELECT = {
+  id: true,
+  nombre: true,
+  codActividad: true,
+  active: true,
+} satisfies Prisma.PurchaseActivitySelect;
+
+export type ActivityRefRow = Prisma.PurchaseActivityGetPayload<{
+  select: typeof ACTIVITY_REF_SELECT;
+}>;
 
 export type PurchaseActivityRow = Prisma.PurchaseActivityGetPayload<{
   select: typeof ACTIVITY_SELECT;

@@ -16,6 +16,14 @@ import { ANEXO_CLASSIFICATION_EPOCH } from './anexo/resolve-classification';
 import { ListPurchaseDocumentsDto } from './dto/list-purchase-documents.dto';
 import { PurchaseDocumentFiltersDto } from './dto/purchase-document-filters.dto';
 import { UpdateClassificationDto } from './dto/update-classification.dto';
+import { UpdateDocumentActivityDto } from './dto/update-document-activity.dto';
+import {
+  ActivityWhere,
+  attachResolvedActivity,
+  buildActivityFilter,
+  WithResolvedActivity,
+} from './activity/activity-resolution';
+import { assertActivityAssignableToReceptor } from './activity/activity-guards';
 import { ReprocessDto } from './dto/reprocess.dto';
 import { ListParseResultsDto } from './dto/list-parse-results.dto';
 import {
@@ -65,8 +73,10 @@ const ZERO = '0';
 export function buildPurchaseDocumentWhere(
   tenantId: string,
   dto: PurchaseDocumentFiltersDto,
+  activityWhere?: ActivityWhere,
 ): Prisma.PurchaseDocumentWhereInput {
   const where: Prisma.PurchaseDocumentWhereInput = { tenantId };
+  const and: Prisma.PurchaseDocumentWhereInput[] = [];
 
   if (dto.emisorId) where.emisorId = dto.emisorId;
   if (dto.receptorId) where.receptorId = dto.receptorId;
@@ -91,8 +101,17 @@ export function buildPurchaseDocumentWhere(
   const classification = classificationFilter(dto.classification);
   if (classification) {
     // AND explícito para no pisar el OR de la búsqueda libre.
-    where.AND = classification;
+    and.push(...classification);
   }
+
+  // El filtro por actividad trae su propio OR (override del documento o default
+  // del proveedor) y va dentro del AND por la misma razón: un OR suelto en la
+  // raíz se fusionaría con el de la búsqueda libre y ensancharía el resultado
+  // en vez de acotarlo. `activityWhere` ya viene resuelto contra la base —
+  // `buildActivityFilter()`—, para que esta función siga siendo pura.
+  if (activityWhere) and.push(activityWhere);
+
+  if (and.length > 0) where.AND = and;
 
   return where;
 }
@@ -233,12 +252,17 @@ export class PurchaseBookService {
   async findAll(
     ctx: TenantContext,
     dto: ListPurchaseDocumentsDto,
-  ): Promise<Paginated<PurchaseDocumentListRow>> {
+  ): Promise<Paginated<WithResolvedActivity<PurchaseDocumentListRow>>> {
     const tenantId = this.requireTenantId(ctx);
-    const where = buildPurchaseDocumentWhere(tenantId, dto);
 
-    const [data, total] = await this.prisma.withTenant(tenantId, (tx) =>
-      Promise.all([
+    const [data, total] = await this.prisma.withTenant(tenantId, async (tx) => {
+      const where = buildPurchaseDocumentWhere(
+        tenantId,
+        dto,
+        await this.resolveActivityFilter(tx, tenantId, dto),
+      );
+
+      const [rows, count] = await Promise.all([
         tx.purchaseDocument.findMany({
           where,
           select: DOCUMENT_LIST_SELECT,
@@ -247,19 +271,46 @@ export class PurchaseBookService {
           take: dto.limit,
         }),
         tx.purchaseDocument.count({ where }),
-      ]),
-    );
+      ]);
+
+      // La actividad efectiva se resuelve sobre la página ya recortada, no
+      // sobre el filtro: son dos consultas acotadas por `limit`, no una por
+      // fila.
+      return [await attachResolvedActivity(tx, tenantId, rows), count] as const;
+    });
 
     return { data, meta: { page: dto.page, limit: dto.limit, total } };
   }
 
+  /**
+   * Traduce el `activityId` del filtro a un predicado, o `undefined` si no hay
+   * filtro por actividad. Corre dentro de la transacción de quien llama porque
+   * consulta el catálogo y el mapeo.
+   */
+  private async resolveActivityFilter(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    dto: PurchaseDocumentFiltersDto,
+  ): Promise<ActivityWhere | undefined> {
+    if (!dto.activityId) return undefined;
+    const { where } = await buildActivityFilter(tx, tenantId, dto.activityId, dto.receptorId);
+    return where;
+  }
+
   async summary(ctx: TenantContext, dto: ListPurchaseDocumentsDto): Promise<PurchaseBookSummary> {
     const tenantId = this.requireTenantId(ctx);
-    const where = buildPurchaseDocumentWhere(tenantId, dto);
 
     const [aggregate, unclassifiedCount, jsonAttachmentsWithoutParse] =
-      await this.prisma.withTenant(tenantId, (tx) =>
-        Promise.all([
+      await this.prisma.withTenant(tenantId, async (tx) => {
+        // El resumen tiene que sumar EXACTAMENTE lo que el listado muestra: si
+        // el filtro por actividad no llegara hasta acá, los totales de una
+        // pantalla filtrada serían los del contribuyente completo.
+        const where = buildPurchaseDocumentWhere(
+          tenantId,
+          dto,
+          await this.resolveActivityFilter(tx, tenantId, dto),
+        );
+        return Promise.all([
           tx.purchaseDocument.aggregate({
             where,
             _count: { _all: true },
@@ -277,8 +328,8 @@ export class PurchaseBookService {
           tx.attachment.count({
             where: { tenantId, fileType: 'JSON', parseResult: { is: null } },
           }),
-        ]),
-      );
+        ]);
+      });
 
     const sums = aggregate._sum;
     return {
@@ -297,16 +348,25 @@ export class PurchaseBookService {
   async findOne(
     ctx: TenantContext,
     id: string,
-  ): Promise<PurchaseDocumentDetailRow & { rawJson: Prisma.JsonValue | null }> {
+  ): Promise<
+    WithResolvedActivity<PurchaseDocumentDetailRow> & { rawJson: Prisma.JsonValue | null }
+  > {
     const tenantId = this.requireTenantId(ctx);
     const includeRaw = ctx.actor.role === Role.ADMIN;
 
-    const document = await this.prisma.withTenant(tenantId, (tx) =>
-      tx.purchaseDocument.findFirst({
+    const document = await this.prisma.withTenant(tenantId, async (tx) => {
+      const row = await tx.purchaseDocument.findFirst({
         where: { id, tenantId },
         select: { ...DOCUMENT_DETAIL_SELECT, rawJson: includeRaw },
-      }),
-    );
+      });
+      if (!row) return null;
+      // La misma resolución que el listado, sobre una fila: el detalle tiene
+      // que decir de dónde salió la actividad —override o default del
+      // proveedor—, que es justo lo que el contador necesita ver antes de
+      // corregirla.
+      const [resolved] = await attachResolvedActivity(tx, tenantId, [row]);
+      return resolved;
+    });
 
     if (!document) {
       throw new NotFoundException({
@@ -383,6 +443,70 @@ export class PurchaseBookService {
     this.logger.info(
       { tenantId, documentId: id, actorId: ctx.actor.id },
       'Clasificación del Anexo 3 actualizada',
+    );
+    return this.findOne(ctx, id);
+  }
+
+  // -------------------------------------------------------------------------
+  // Actividad económica del documento (Addendum 11, fase 3)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Override de la actividad de una compra: la punta de la cascada
+   * `override del documento > default del proveedor > sin clasificar`.
+   *
+   * `activityId: null` quita el override y devuelve el documento al default de
+   * su proveedor. No deja el documento sin actividad por sí solo: si el
+   * proveedor está mapeado, la compra vuelve a heredar ese criterio.
+   *
+   * Queda registrado quién lo decidió y cuándo, en columnas propias y no en
+   * `classifiedById` / `classifiedAt`: la actividad y las columnas Q–T son dos
+   * decisiones contables distintas, tomadas en momentos distintos.
+   */
+  async updateDocumentActivity(
+    ctx: TenantContext,
+    id: string,
+    dto: UpdateDocumentActivityDto,
+  ): Promise<PurchaseDocumentDetailRow & { rawJson: Prisma.JsonValue | null }> {
+    const tenantId = this.requireTenantId(ctx);
+
+    await this.prisma.withTenant(tenantId, async (tx) => {
+      const existing = await tx.purchaseDocument.findFirst({
+        where: { id, tenantId },
+        select: { id: true, receptorId: true },
+      });
+      if (!existing) {
+        throw new NotFoundException({
+          error: 'PURCHASE_DOCUMENT_NOT_FOUND',
+          message: 'Documento de compra no encontrado',
+        });
+      }
+
+      // La actividad tiene que ser del MISMO contribuyente que la compra. Sin
+      // esta guarda, el override sería la puerta trasera que el mapeo de
+      // proveedores cierra por adelante.
+      if (dto.activityId !== null) {
+        await assertActivityAssignableToReceptor(tx, tenantId, dto.activityId, existing.receptorId);
+      }
+
+      await tx.purchaseDocument.update({
+        where: { id },
+        data: {
+          activityId: dto.activityId,
+          // La traza se escribe también al limpiar: "alguien decidió que esta
+          // compra NO lleva override" es una decisión, y borrarla junto con el
+          // id dejaría la fila indistinguible de una que nadie miró nunca.
+          activityAssignedById: ctx.actor.id,
+          activityAssignedAt: new Date(),
+        },
+      });
+    });
+
+    this.logger.info(
+      { tenantId, documentId: id, activityId: dto.activityId, actorId: ctx.actor.id },
+      dto.activityId === null
+        ? 'Override de actividad del documento eliminado'
+        : 'Override de actividad del documento asignado',
     );
     return this.findOne(ctx, id);
   }

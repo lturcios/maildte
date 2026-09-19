@@ -481,7 +481,33 @@ export interface AnexoOverrides {
 }
 
 /** Fila del listado del libro (GET /purchase-book/documents). */
-export interface PurchaseDocumentListItem extends AnexoOverrides {
+/**
+ * Actividad EFECTIVA de una compra, ya resuelta por el backend
+ * (Addendum 11, §7.4): `override del documento > default del proveedor > sin
+ * clasificar`.
+ *
+ * Viaja el ORIGEN y no solo el valor, y eso no es decorativo: "heredado del
+ * proveedor" se corrige mapeando el proveedor UNA vez, mientras que un override
+ * hay que tocarlo documento a documento. Son dos acciones distintas y el
+ * contador necesita saber cuál está mirando.
+ */
+export type ActivitySource = 'override' | 'supplier-default' | 'missing';
+
+export interface ResolvedActivity {
+  activityId: string | null;
+  source: ActivitySource;
+  activity: PurchaseActivityRef | null;
+}
+
+/** Traza de quién asignó la actividad de una compra y cuándo. */
+export interface DocumentActivityFields {
+  activityId: string | null;
+  activityAssignedById: string | null;
+  activityAssignedAt: string | null;
+  resolvedActivity: ResolvedActivity | null;
+}
+
+export interface PurchaseDocumentListItem extends AnexoOverrides, DocumentActivityFields {
   id: string;
   fecEmi: string;
   tipoDte: string;
@@ -539,7 +565,7 @@ export interface PurchaseDocumentPayment {
 }
 
 /** Detalle completo (GET /purchase-book/documents/:id). */
-export interface PurchaseDocumentDetail extends AnexoOverrides {
+export interface PurchaseDocumentDetail extends AnexoOverrides, DocumentActivityFields {
   id: string;
   attachmentId: string;
   emailId: string;
@@ -684,4 +710,116 @@ export interface DteParseResult {
     emailId: string;
     sizeBytes: number;
   };
+}
+
+// -----------------------------------------------------------------------------
+// Addendum 11, fase 3 — catálogo de actividad económica
+// -----------------------------------------------------------------------------
+
+/**
+ * Una actividad del catálogo de un contribuyente.
+ *
+ * El nombre es lo que identifica ("Restaurante", "Catering"); `codActividad` es
+ * el código CIIU que declaran los proveedores y sirve de pista, no de
+ * identidad: dos locales del mismo rubro son dos unidades de negocio distintas
+ * con el mismo código.
+ */
+export interface PurchaseActivity extends AnexoDefaults {
+  id: string;
+  receptorId: string;
+  nombre: string;
+  codActividad: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreatePurchaseActivityInput {
+  receptorId: string;
+  nombre: string;
+  codActividad?: string | null;
+}
+
+export interface UpdatePurchaseActivityInput extends Partial<AnexoDefaults> {
+  nombre?: string;
+  codActividad?: string | null;
+  active?: boolean;
+}
+
+/** Referencia mínima a una actividad, tal como viaja adjunta a un documento. */
+export interface PurchaseActivityRef {
+  id: string;
+  nombre: string;
+  codActividad: string | null;
+  active: boolean;
+}
+
+/**
+ * El default de un proveedor para un receptor. Es una relación ternaria: el
+ * mismo distribuidor le vende a varios contribuyentes del buzón y a cada uno le
+ * sirve una unidad de negocio distinta.
+ */
+export interface SupplierActivityDefault {
+  id: string;
+  receptorId: string;
+  emisorId: string;
+  activityId: string;
+  assignedById: string | null;
+  assignedAt: string;
+  emisor: DtePartyRef;
+  activity: PurchaseActivityRef;
+  /** Compras de ese proveedor a este receptor: es lo que ordena la lista. */
+  documentCount: number;
+}
+
+/** Una actividad propuesta por la siembra, derivada de los DTE ya recibidos. */
+export interface ProposedActivity {
+  codActividad: string;
+  nombre: string;
+  documentCount: number;
+}
+
+/** Un proveedor propuesto, con la actividad que declara con más frecuencia. */
+export interface ProposedSupplierMapping {
+  emisorId: string;
+  emisorNit: string;
+  emisorNombre: string;
+  codActividad: string;
+  activityNombre: string;
+  documentCount: number;
+  /** Cuántas de esas compras declaran el código elegido. */
+  matchingCount: number;
+}
+
+export interface ActivitySeedProposal {
+  receptorId: string;
+  activities: ProposedActivity[];
+  mappings: ProposedSupplierMapping[];
+  /** Compras sin `receptorCodActividad`: no participan de la propuesta. */
+  documentsWithoutActivity: number;
+}
+
+/**
+ * Lote de siembra ya revisado por el contador.
+ *
+ * Los mapeos referencian la actividad POR NOMBRE y no por id, porque en el
+ * mismo lote puede no existir todavía. Eso es además lo que hace posible
+ * FUSIONAR dos actividades propuestas antes de escribir nada: basta con que
+ * los dos grupos de proveedores apunten al mismo nombre.
+ */
+export interface ApplyActivitySeedInput {
+  receptorId: string;
+  confirm: true;
+  activities: { nombre: string; codActividad?: string | null }[];
+  mappings: { emisorId: string; activityNombre: string }[];
+}
+
+export interface ActivitySeedApplyResult {
+  receptorId: string;
+  activitiesCreated: number;
+  activitiesSkipped: number;
+  mappingsCreated: number;
+  mappingsSkipped: number;
+  skippedActivityNames: string[];
+  skippedEmisorIds: string[];
 }

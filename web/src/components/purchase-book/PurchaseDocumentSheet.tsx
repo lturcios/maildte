@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { labelForCode, usePurchaseBookCatalogsStore } from '@/stores/purchase-book-catalogs-store';
 import type { PurchaseDocumentDetail } from '@/types/domain';
 import { ClassificationEditor } from './ClassificationEditor';
+import { ActivityEditor } from './ActivityEditor';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -291,6 +292,22 @@ export function PurchaseDocumentSheet({
                   </dl>
                 </Section>
               )}
+
+              <Section title="Actividad económica">
+                <ActivityEditor
+                  document={document}
+                  canEdit={isAdmin}
+                  onSaved={(updated) => {
+                    setLoaded({ id: updated.id, data: updated });
+                    onClassificationSaved();
+                  }}
+                />
+                {document.activityAssignedAt && (
+                  <p className="text-xs text-muted-foreground">
+                    Última asignación: {formatDateTime(document.activityAssignedAt)}
+                  </p>
+                )}
+              </Section>
 
               <Section title="Clasificación para el Anexo 3">
                 <ClassificationEditor

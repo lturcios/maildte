@@ -1975,6 +1975,250 @@ más adelante, las filas siguen ahí y el mapeo también. Bajar el esquema (borr
 las tablas) no es parte del rollback y no hace falta: `purchase_documents` no
 depende de ellas para nada de lo que ya funcionaba.
 
+### 9.g Probar el panel de actividad contra datos reales (Addendum 11, fase 3)
+
+El catálogo de actividad, el mapeo de proveedores y la siembra están cubiertos
+por tests, pero los tests usan dos DTE de muestra. La pregunta que ningún test
+puede responder es **si la propuesta de siembra tiene sentido contable sobre el
+histórico real**: si propone las cuatro actividades que midió la revisión de la
+fase 3, si el mapeo por proveedor cae donde tiene que caer, y si fusionar
+`56101` con `56107` deja el catálogo que el contador esperaba.
+
+De esa respuesta depende la rebanada siguiente —encadenar las columnas Q–T a la
+actividad resuelta—, que **cambia lo que sale en el Anexo 3 que ya se presenta**.
+Por eso se mira antes.
+
+> **NUNCA contra la base de producción.** La propuesta (`GET`) es de solo
+> lectura y se puede pedir en producción sin compromiso —ya está en el §9.f
+> punto 5—, pero este procedimiento incluye **aplicar** la siembra, que escribe
+> el catálogo y el mapeo del contribuyente. Se hace sobre una copia local y
+> desechable.
+
+#### 1. Traer una copia de la base
+
+En el VPS, un dump del momento (o el último respaldo del §8, que sirve igual):
+
+```bash
+cd /opt/maildte
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  pg_dump -U maildte -d maildte | gzip > /tmp/maildte_para_probar.sql.gz
+ls -lh /tmp/maildte_para_probar.sql.gz
+```
+
+Y desde la máquina de trabajo:
+
+```bash
+scp usuario@vps:/tmp/maildte_para_probar.sql.gz .
+```
+
+**El storage no hace falta.** Toda esta pantalla se resuelve contra
+`purchase_documents`, `dte_parties`, `purchase_activities` y
+`supplier_activity_defaults`; ni la propuesta ni el mapeo leen un solo archivo
+del disco. Son varios GB que no aportan nada a esta prueba.
+
+Borrar el dump del VPS cuando terminó de copiarse (`rm /tmp/maildte_para_probar.sql.gz`):
+es la base entera de un contribuyente real en un `/tmp` accesible.
+
+#### 2. Restaurar en el Postgres local, en una base aparte
+
+El contenedor local es el mismo que usan los e2e. Si no está levantado:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml up -d
+```
+
+La copia va a una base **propia**, `maildte_real`: no pisa la `maildte` de
+desarrollo ni la `maildte_test` de los e2e, y se borra de un comando al final.
+
+```bash
+gunzip -c maildte_para_probar.sql.gz > maildte_para_probar.sql
+
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d postgres -c "DROP DATABASE IF EXISTS maildte_real;"
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d postgres -c "CREATE DATABASE maildte_real;"
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real < maildte_para_probar.sql
+```
+
+El rol `maildte_app` es del **cluster**, no de la base, así que un `pg_dump` no
+lo trae. En el contenedor local ya existe —lo crea la migración
+`multi_tenancy`, que corrió al levantar el entorno—, pero conviene confirmarlo,
+porque sin ese rol la API no arranca:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real -c "SELECT rolname FROM pg_roles WHERE rolname = 'maildte_app';"
+```
+
+Si no aparece, se crea con la misma definición que la migración (rol
+restringido: **sin** `BYPASSRLS`, o el aislamiento entre tenants deja de
+probarse):
+
+```sql
+CREATE ROLE "maildte_app" WITH LOGIN PASSWORD 'maildte_app_dev_only'
+  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+```
+
+#### 3. Poner la copia al día con las migraciones
+
+**Este paso no es opcional.** La copia trae el esquema que tenga producción en
+ese momento, que puede ser anterior al catálogo de actividad. Sin esto, el
+panel responde `500` contra tablas que no existen.
+
+```bash
+DATABASE_URL="postgresql://maildte:secret@localhost:5434/maildte_real" \
+  pnpm exec prisma migrate deploy --schema=./prisma/schema.prisma
+```
+
+La migración del catálogo es aditiva: crea dos tablas y tres columnas y no toca
+ni una fila del histórico. Si sale `P3009`, la copia arrastra una migración que
+quedó marcada como fallida en producción — eso es un problema **de producción**
+y hay que mirarlo allá (§9.f punto 6), no taparlo en la copia.
+
+#### 4. Una credencial local para entrar al panel
+
+El dump trae los usuarios reales con sus hashes. En vez de usar una contraseña
+de producción en una laptop, se le pone una contraseña local a un ADMIN **de la
+copia**.
+
+> **El hash argon2 NO se pega dentro de comillas dobles.** Tiene la forma
+> `$argon2id$v=19$m=65536,t=3,p=4$...`, y tanto bash como PowerShell expanden
+> cada `$...` como una variable: `$argon2id`, `$v` y `$m` quedan vacías y `$0`
+> se reemplaza por la ruta del propio shell. Lo que llega a la base es
+> `=19=65536,t=3,p=4/usr/bin/bash...`, que no es un hash.
+>
+> El síntoma no es un login rechazado sino un **500 `Error no controlado`**:
+> `PasswordService.verify()` llama a `argon2.verify()`, y argon2 **lanza una
+> excepción** cuando el hash no es un PHC válido en vez de devolver `false`.
+> Un 401 sería un hash correcto con la contraseña equivocada; un 500 acá es,
+> casi siempre, este error de comillas.
+
+```bash
+# 1. Elegir un ADMIN y ver a qué tenant pertenece.
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real -c "
+    SELECT u.email, u.role, t.slug
+    FROM users u LEFT JOIN tenants t ON t.id = u.\"tenantId\"
+    WHERE u.role = 'ADMIN' AND u.active
+    ORDER BY t.slug;"
+
+# 2. Generar un hash argon2id (el mismo formato que usa la API).
+node -e "const a=require('argon2');a.hash('probar-local-2026',{type:a.argon2id}).then(console.log)"
+
+# 3. Escribirlo SOLO en la copia. El heredoc con el delimitador ENTRE COMILLAS
+#    SIMPLES (<<'SQL') es lo que hace que el shell no toque un solo caracter
+#    del hash. Sin esas comillas vuelve a romperse.
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real <<'SQL'
+UPDATE users
+   SET "passwordHash" = '<pegar acá el hash completo, empieza con $argon2id$>'
+ WHERE email = '<el ADMIN elegido>';
+SQL
+
+# 4. Verificar ANTES de ir al panel: tiene que empezar con $argon2id$.
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real -c \
+  "SELECT email, left(\"passwordHash\", 12) AS inicio FROM users WHERE email = '<el ADMIN elegido>';"
+# -> inicio | $argon2id$v=
+```
+
+El paso 4 no es opcional. Es el que separa "la contraseña estaba mal" de "el
+hash nunca llegó entero", y sin él los dos se ven igual desde el navegador.
+
+#### 5. Levantar la API y el panel contra la copia
+
+```bash
+DATABASE_URL="postgresql://maildte:secret@localhost:5434/maildte_real" \
+APP_DATABASE_URL="postgresql://maildte_app:maildte_app_dev_only@localhost:5434/maildte_real" \
+REDIS_URL="redis://localhost:6380/2" \
+ENCRYPTION_KEY="$(node -e "console.log('a'.repeat(64))")" \
+JWT_SECRET="solo-para-probar-local-0123456789abcdef" \
+JWT_REFRESH_SECRET="solo-para-probar-local-refresh-0123456789" \
+STORAGE_ROOT="$(mktemp -d)" \
+  pnpm start:dev
+```
+
+En otra terminal, el panel (`pnpm --dir web dev`, http://localhost:5173, el
+proxy de Vite ya reenvía `/api` al 3000).
+
+Tres decisiones de ese bloque que importan:
+
+- **`ENCRYPTION_KEY` falsa, a propósito.** La clave real no baja a una laptop.
+  La consecuencia es que las contraseñas IMAP de la copia no se pueden
+  descifrar: cualquier intento de sincronizar falla, ruidosamente, que es lo
+  correcto. Nada de esta prueba las toca.
+- **`REDIS_URL` en la DB 2**, separada de la 0 (desarrollo) y de la 1 (e2e).
+  Acá no se encola nada, pero la API pide Redis para arrancar.
+- **`STORAGE_ROOT` a un directorio temporal vacío.** Ningún archivo se lee ni se
+  escribe en este flujo; apuntar al storage real sería darle permiso de
+  escritura sobre los DTE por nada.
+
+Las variables de la línea de comandos **ganan sobre el `.env` del repo**, que
+apunta al 5433 y a la base de desarrollo: `ConfigModule` carga el archivo con
+dotenv, y dotenv no pisa lo que ya está en el entorno. Aun así, el primer
+arranque conviene mirarlo: la API loguea a qué base se conectó, y si dice
+`maildte` en vez de `maildte_real` hay que parar antes de tocar nada.
+
+**No correr el worker.** Sincronizaría los buzones reales desde la laptop.
+
+#### 6. Qué mirar
+
+Entrar al panel con el ADMIN del paso 4 → **Libro de compras → Actividades** →
+elegir el contribuyente → **Sembrar desde las compras**.
+
+Las preguntas que esta prueba tiene que contestar, en orden:
+
+1. **¿Cuántas actividades propone y con qué volumen?** La revisión de la fase 3
+   midió cuatro (`56101` 561 compras, `56107` 290, `47219` 8, `10005` 3) sobre
+   el contribuyente conocido. Si aparece algo muy distinto, el histórico cambió
+   y la premisa hay que revisarla.
+2. **¿La columna de proveedores delata las etiquetas duplicadas?** Es el dato
+   que decidió el rediseño: veintiséis proveedores coincidían en `56101` y solo
+   dos sostenían los 290 documentos de `56107`. Un código con volumen alto y un
+   puñado de proveedores es una etiqueta, no una actividad.
+3. **¿La fusión hace lo que promete?** Fusionar `56107` en `56101`, descartar
+   `10005`, aplicar. Verificar después, en el listado de proveedores, que los
+   dos grupos quedaron bajo la misma actividad y que ninguno quedó sin mapear.
+4. **¿Queda algún proveedor importante sin actividad?** Es lo que va a tener que
+   mapear a mano el contador, y su tamaño decide si hace falta una herramienta
+   de asignación masiva (fase 4).
+5. **¿Aparece la necesidad de fusionar actividades YA escritas?** Hoy no existe:
+   la fusión solo puede pasar sobre la propuesta, antes de aplicar. Si en la
+   prueba hace falta unir dos actividades después de sembradas, eso es una
+   rebanada nueva y hay que anotarla.
+
+Un contraste rápido contra la base, para no depender solo de la pantalla:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real -c "
+    SELECT a.nombre, a.\"codActividad\", COUNT(DISTINCT s.\"emisorId\") AS proveedores
+    FROM purchase_activities a
+    LEFT JOIN supplier_activity_defaults s ON s.\"activityId\" = a.id
+    GROUP BY a.id, a.nombre, a.\"codActividad\"
+    ORDER BY proveedores DESC;"
+```
+
+La distribución **previa** a la siembra —la que mira la pregunta 1 sin abrir el
+panel— es la consulta del gate del §9.b.
+
+#### 7. Limpiar
+
+La copia es la contabilidad de un contribuyente real. No se deja dando vueltas.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d postgres -c "DROP DATABASE maildte_real;"
+rm -f maildte_para_probar.sql maildte_para_probar.sql.gz
+```
+
+Y en el VPS, si todavía está: `rm -f /tmp/maildte_para_probar.sql.gz`.
+
+Nada de lo hecho acá toca producción: la siembra se aplicó sobre la copia. Para
+sembrar de verdad, el contador usa el panel contra el sistema real, que es el
+§9.f punto 5.
+
 ### Seguir el trabajo en los logs del worker
 
 El worker loguea cada lectura con `tenantId`, `attachmentId`, `status` y

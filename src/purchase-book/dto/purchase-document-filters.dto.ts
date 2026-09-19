@@ -21,6 +21,16 @@ export const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 export const MONTH_PATTERN = /^\d{4}-\d{2}$/;
 
 /**
+ * UUID v4 o el literal `none`.
+ *
+ * Un solo `@Matches` y no `@IsUUID()` mas una excepcion: class-validator
+ * encadena los decoradores con AND, asi que `@IsUUID()` rechazaria `none`
+ * antes de que nadie pudiera contemplarlo.
+ */
+export const ACTIVITY_FILTER_PATTERN =
+  /^(none|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+/**
  * Filtros comunes del libro de compras (Addendum 10, §7): los comparten el
  * listado y el export del Anexo 3, para que lo exportado sea exactamente lo que
  * el usuario ve en pantalla.
@@ -77,6 +87,23 @@ export class PurchaseDocumentFiltersDto {
   @IsOptional()
   @IsIn(CLASSIFICATION_FILTERS)
   classification?: ClassificationFilter;
+
+  /**
+   * Filtro por actividad economica (Addendum 11, fase 3).
+   *
+   * Acepta el id de una actividad del catalogo o el literal `none`, que pide
+   * las compras sin actividad resuelta — el trabajo que queda pendiente
+   * despues de sembrar el mapeo, y por eso el filtro mas usado de la pantalla.
+   *
+   * NO se traduce a `where activityId = X`: la actividad efectiva es un valor
+   * derivado (override del documento > default del proveedor), y el predicado
+   * lo arma `buildActivityFilter()` contra la base.
+   */
+  @IsOptional()
+  @Matches(ACTIVITY_FILTER_PATTERN, {
+    message: 'activityId debe ser un UUID o el literal none',
+  })
+  activityId?: string;
 
   @IsOptional()
   @Type(() => Number)

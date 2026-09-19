@@ -23,7 +23,7 @@ import {
   SUPPLIER_ACTIVITY_DEFAULT_SELECT,
   SupplierActivityDefaultRow,
 } from '../purchase-book.projections';
-import { assertReceptorExists } from './activity-guards';
+import { assertActivityAssignableToReceptor, assertReceptorExists } from './activity-guards';
 
 /**
  * Tope del mapeo que se devuelve de una vez.
@@ -304,7 +304,7 @@ export class PurchaseActivityService {
     const mapping = await this.prisma.withTenant(tenantId, async (tx) => {
       await assertReceptorExists(tx, tenantId, dto.receptorId);
       await this.assertEmisorExists(tx, tenantId, dto.emisorId);
-      await this.assertActivityBelongsToReceptor(tx, tenantId, dto.activityId, dto.receptorId);
+      await assertActivityAssignableToReceptor(tx, tenantId, dto.activityId, dto.receptorId);
 
       return tx.supplierActivityDefault.upsert({
         where: {
@@ -413,37 +413,6 @@ export class PurchaseActivityService {
       throw new NotFoundException({
         error: 'DTE_PARTY_NOT_FOUND',
         message: 'Proveedor no encontrado',
-      });
-    }
-  }
-
-  private async assertActivityBelongsToReceptor(
-    tx: Prisma.TransactionClient,
-    tenantId: string,
-    activityId: string,
-    receptorId: string,
-  ): Promise<void> {
-    const activity = await tx.purchaseActivity.findFirst({
-      where: { id: activityId, tenantId },
-      select: { id: true, receptorId: true, active: true },
-    });
-    if (!activity) {
-      throw new NotFoundException({
-        error: 'PURCHASE_ACTIVITY_NOT_FOUND',
-        message: 'Actividad no encontrada',
-      });
-    }
-    if (activity.receptorId !== receptorId) {
-      throw new UnprocessableEntityException({
-        error: 'PURCHASE_ACTIVITY_RECEPTOR_MISMATCH',
-        message:
-          'La actividad pertenece a otro contribuyente. El mapeo de proveedores es por receptor: apuntar a la actividad de otro aplicaría su criterio a estas compras.',
-      });
-    }
-    if (!activity.active) {
-      throw new UnprocessableEntityException({
-        error: 'PURCHASE_ACTIVITY_INACTIVE',
-        message: 'La actividad está desactivada: reactivala antes de asignarla a un proveedor',
       });
     }
   }

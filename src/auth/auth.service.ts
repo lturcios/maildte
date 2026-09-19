@@ -63,7 +63,12 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
 
-    const valid = await this.password.verify(user.passwordHash, plainPassword);
+    // `userId` y no el email: el log tiene que permitir encontrar la fila sin
+    // dejar una credencial escrita en un archivo de texto.
+    const valid = await this.password.verify(user.passwordHash, plainPassword, {
+      userId: user.id,
+      tenantId: user.tenantId,
+    });
     if (!valid) {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }

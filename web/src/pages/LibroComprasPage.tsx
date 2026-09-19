@@ -1,17 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { SlidersHorizontalIcon } from 'lucide-react';
+import { LayersIcon, SlidersHorizontalIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { apiGet, ApiError } from '@/lib/api-client';
 import { formatDateOnly, formatMoney } from '@/lib/format';
 import { describeSupplierId, resolveEffectiveClassification } from '@/lib/anexo-classification';
+import {
+  ALL,
+  buildFiltersQuery,
+  CLASSIFICATION_OPTIONS,
+  countActiveFilters,
+  DEFAULT_FILTERS,
+  SIN_ACTIVIDAD,
+} from '@/lib/purchase-book-filters';
+import type { Filters } from '@/lib/purchase-book-filters';
 import { useAccounts } from '@/hooks/useAccounts';
 import { useAuthStore } from '@/stores/auth-store';
 import { useDtePartiesStore } from '@/stores/dte-parties-store';
 import type {
   ClassificationFilter,
   Paginated,
+  PurchaseActivity,
   PurchaseBookSummary,
   PurchaseDocumentListItem,
 } from '@/types/domain';
@@ -27,6 +37,7 @@ import {
   RecordCardList,
   RecordCardSkeletons,
 } from '@/components/common/RecordCard';
+import { ActivityBadge } from '@/components/purchase-book/ActivityBadge';
 import { ExportAnexoPanel } from '@/components/purchase-book/ExportAnexoPanel';
 import { PurchaseDocumentSheet } from '@/components/purchase-book/PurchaseDocumentSheet';
 import { ReprocessButton } from '@/components/purchase-book/ReprocessButton';
@@ -51,66 +62,6 @@ import {
 } from '@/components/ui/table';
 
 const LIMIT = 50;
-const ALL = 'all';
-
-const CLASSIFICATION_OPTIONS: { value: ClassificationFilter; label: string }[] = [
-  { value: 'all', label: 'Todas' },
-  { value: 'classified', label: 'Clasificadas' },
-  { value: 'unclassified', label: 'Sin clasificar' },
-];
-
-interface Filters {
-  receptorId: string;
-  emisorId: string;
-  accountId: string;
-  from: string;
-  to: string;
-  month: string;
-  classification: ClassificationFilter;
-}
-
-const DEFAULT_FILTERS: Filters = {
-  receptorId: ALL,
-  emisorId: ALL,
-  accountId: ALL,
-  from: '',
-  to: '',
-  month: '',
-  classification: 'all',
-};
-
-/**
- * Query de filtros SIN paginación: la usan el listado, el resumen y el export,
- * para que los tres miren exactamente el mismo conjunto de compras.
- */
-function buildFiltersQuery(filters: Filters, search: string): string {
-  const params = new URLSearchParams();
-  if (filters.receptorId !== ALL) params.set('receptorId', filters.receptorId);
-  if (filters.emisorId !== ALL) params.set('emisorId', filters.emisorId);
-  if (filters.accountId !== ALL) params.set('accountId', filters.accountId);
-  if (filters.month) {
-    params.set('month', filters.month);
-  } else {
-    if (filters.from) params.set('from', filters.from);
-    if (filters.to) params.set('to', filters.to);
-  }
-  if (search.trim()) params.set('q', search.trim());
-  if (filters.classification !== 'all') params.set('classification', filters.classification);
-  return params.toString();
-}
-
-function countActiveFilters(filters: Filters, search: string): number {
-  return [
-    filters.receptorId !== ALL,
-    filters.emisorId !== ALL,
-    filters.accountId !== ALL,
-    filters.from !== '',
-    filters.to !== '',
-    filters.month !== '',
-    filters.classification !== 'all',
-    search.trim() !== '',
-  ].filter(Boolean).length;
-}
 
 /**
  * Libro de compras (Addendum 10, §9.2).
@@ -140,6 +91,16 @@ export function LibroComprasPage() {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  /**
+   * Catalogo guardado JUNTO al receptor que lo pidio, igual que el detalle
+   * guarda el documento junto a su id. Asi el select deriva su contenido por
+   * comparacion —y nunca ofrece las actividades del receptor anterior
+   * mientras llegan las del nuevo— sin un setState dentro del efecto.
+   */
+  const [activityCache, setActivityCache] = useState<{
+    receptorId: string;
+    items: PurchaseActivity[];
+  } | null>(null);
 
   const latestRequestId = useRef(0);
   const latestSummaryId = useRef(0);
@@ -153,6 +114,49 @@ export function LibroComprasPage() {
     const timeout = setTimeout(() => setDebouncedSearch(searchInput.trim()), 350);
     return () => clearTimeout(timeout);
   }, [searchInput]);
+
+  /**
+   * Catalogo de actividad del receptor filtrado, para poblar su select.
+   *
+   * Solo ADMIN: `GET /purchase-book/activities` es criterio contable y esta
+   * restringido, igual que la clasificacion Q-T. Un MIEMBRO ve la columna de
+   * actividad en el listado —viene resuelta con cada documento— pero no filtra.
+   *
+   * Sin receptor no se pide nada: el catalogo es POR CONTRIBUYENTE y la API
+   * exige el `receptorId`. Se usa estado local y no el store de Actividades
+   * para no pisarle el receptor que ese modulo tenga abierto.
+   */
+  const receptorFiltrado = filters.receptorId;
+  useEffect(() => {
+    if (!isAdmin || receptorFiltrado === ALL) return;
+
+    let cancelado = false;
+    void (async () => {
+      try {
+        const response = await apiGet<{ data: PurchaseActivity[] }>(
+          `/purchase-book/activities?receptorId=${receptorFiltrado}`,
+        );
+        if (!cancelado) setActivityCache({ receptorId: receptorFiltrado, items: response.data });
+      } catch {
+        // El filtro de actividad simplemente no se ofrece. No es un error que
+        // valga interrumpir la lectura del libro, que es a lo que se vino.
+        if (!cancelado) setActivityCache({ receptorId: receptorFiltrado, items: [] });
+      }
+    })();
+
+    return () => {
+      cancelado = true;
+    };
+  }, [receptorFiltrado, isAdmin]);
+
+  /** Solo las activas del receptor filtrado: una actividad retirada no se ofrece. */
+  const activities = useMemo(
+    () =>
+      activityCache?.receptorId === receptorFiltrado
+        ? activityCache.items.filter((activity) => activity.active)
+        : [],
+    [activityCache, receptorFiltrado],
+  );
 
   const filtersQuery = buildFiltersQuery(filters, debouncedSearch);
 
@@ -261,6 +265,13 @@ export function LibroComprasPage() {
             <SlidersHorizontalIcon className="size-4" aria-hidden="true" />
             Clasificación por receptor
           </Link>
+          <Link
+            to="/libro-compras/actividades"
+            className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border px-4 text-sm font-medium hover:bg-accent"
+          >
+            <LayersIcon className="size-4" aria-hidden="true" />
+            Actividades
+          </Link>
           {isAdmin && (
             <ReprocessButton
               accountId={filters.accountId !== ALL ? filters.accountId : undefined}
@@ -280,7 +291,11 @@ export function LibroComprasPage() {
           <Label htmlFor="filter-receptor">Receptor (cliente)</Label>
           <Select
             value={filters.receptorId}
-            onValueChange={(value) => setFilters((prev) => ({ ...prev, receptorId: value }))}
+            onValueChange={(value) =>
+              // La actividad vuelve a "todas": una actividad pertenece a UN
+              // contribuyente, y mandarla junto a otro receptor es un 404.
+              setFilters((prev) => ({ ...prev, receptorId: value, activityId: ALL }))
+            }
           >
             <SelectTrigger id="filter-receptor" className="w-full">
               <SelectValue />
@@ -356,6 +371,51 @@ export function LibroComprasPage() {
             </SelectContent>
           </Select>
         </div>
+
+        {/*
+          Solo ADMIN: el catalogo de actividad es criterio contable y su
+          endpoint esta restringido, igual que la clasificacion Q-T. Un MIEMBRO
+          ve la columna de actividad —viaja resuelta con cada documento— pero no
+          filtra por ella.
+        */}
+        {isAdmin && (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="filter-activity">Actividad</Label>
+            <Select
+              value={filters.activityId}
+              disabled={filters.receptorId === ALL}
+              onValueChange={(value) => setFilters((prev) => ({ ...prev, activityId: value }))}
+            >
+              <SelectTrigger id="filter-activity" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL}>Todas las actividades</SelectItem>
+                <SelectItem value={SIN_ACTIVIDAD}>Sin actividad</SelectItem>
+                {activities.map((activity) => (
+                  <SelectItem key={activity.id} value={activity.id}>
+                    {activity.nombre}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {filters.receptorId === ALL ? (
+              <p className="text-xs text-muted-foreground">
+                Elegi un receptor: las actividades son de cada contribuyente.
+              </p>
+            ) : (
+              activities.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Este contribuyente no tiene catalogo todavia.{' '}
+                  <Link to="/libro-compras/actividades" className="underline">
+                    Sembralo desde sus compras
+                  </Link>
+                  .
+                </p>
+              )
+            )}
+          </div>
+        )}
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="filter-month">Período (mes)</Label>
@@ -443,6 +503,7 @@ export function LibroComprasPage() {
                 <TableHead className="text-right">Gravado</TableHead>
                 <TableHead className="text-right whitespace-nowrap">Crédito fiscal</TableHead>
                 <TableHead className="text-right">Total</TableHead>
+                <TableHead>Actividad</TableHead>
                 <TableHead>Clasificación</TableHead>
               </TableRow>
             </TableHeader>
@@ -450,14 +511,14 @@ export function LibroComprasPage() {
               {loading && documents.length === 0 ? (
                 Array.from({ length: 5 }, (_, index) => (
                   <TableRow key={index}>
-                    <TableCell colSpan={8}>
+                    <TableCell colSpan={9}>
                       <Skeleton className="h-5 w-full" />
                     </TableCell>
                   </TableRow>
                 ))
               ) : rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
+                  <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
                     {emptyMessage}
                   </TableCell>
                 </TableRow>
@@ -504,6 +565,9 @@ export function LibroComprasPage() {
                       {formatMoney(document.montoTotalOperacion)}
                     </TableCell>
                     <TableCell>
+                      <ActivityBadge resolved={document.resolvedActivity} />
+                    </TableCell>
+                    <TableCell>
                       <ClassificationBadge
                         codes={classification.codes}
                         preEpoch={classification.preEpoch}
@@ -547,6 +611,9 @@ export function LibroComprasPage() {
                   <RecordCardField label="Receptor">{document.receptorNombre}</RecordCardField>
                   <RecordCardField label="Crédito fiscal">
                     {formatMoney(document.ivaCreditoFiscal)}
+                  </RecordCardField>
+                  <RecordCardField label="Actividad">
+                    <ActivityBadge resolved={document.resolvedActivity} />
                   </RecordCardField>
                 </RecordCardFields>
               </RecordCard>
