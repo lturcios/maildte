@@ -2080,7 +2080,19 @@ y hay que mirarlo allá (§9.f punto 6), no taparlo en la copia.
 
 El dump trae los usuarios reales con sus hashes. En vez de usar una contraseña
 de producción en una laptop, se le pone una contraseña local a un ADMIN **de la
-copia**:
+copia**.
+
+> **El hash argon2 NO se pega dentro de comillas dobles.** Tiene la forma
+> `$argon2id$v=19$m=65536,t=3,p=4$...`, y tanto bash como PowerShell expanden
+> cada `$...` como una variable: `$argon2id`, `$v` y `$m` quedan vacías y `$0`
+> se reemplaza por la ruta del propio shell. Lo que llega a la base es
+> `=19=65536,t=3,p=4/usr/bin/bash...`, que no es un hash.
+>
+> El síntoma no es un login rechazado sino un **500 `Error no controlado`**:
+> `PasswordService.verify()` llama a `argon2.verify()`, y argon2 **lanza una
+> excepción** cuando el hash no es un PHC válido en vez de devolver `false`.
+> Un 401 sería un hash correcto con la contraseña equivocada; un 500 acá es,
+> casi siempre, este error de comillas.
 
 ```bash
 # 1. Elegir un ADMIN y ver a qué tenant pertenece.
@@ -2094,12 +2106,25 @@ docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T pos
 # 2. Generar un hash argon2id (el mismo formato que usa la API).
 node -e "const a=require('argon2');a.hash('probar-local-2026',{type:a.argon2id}).then(console.log)"
 
-# 3. Escribirlo SOLO en la copia.
+# 3. Escribirlo SOLO en la copia. El heredoc con el delimitador ENTRE COMILLAS
+#    SIMPLES (<<'SQL') es lo que hace que el shell no toque un solo caracter
+#    del hash. Sin esas comillas vuelve a romperse.
 docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
-  psql -U maildte -d maildte_real -c "
-    UPDATE users SET \"passwordHash\" = '<el hash de arriba>'
-    WHERE email = '<el ADMIN elegido>';"
+  psql -U maildte -d maildte_real <<'SQL'
+UPDATE users
+   SET "passwordHash" = '<pegar acá el hash completo, empieza con $argon2id$>'
+ WHERE email = '<el ADMIN elegido>';
+SQL
+
+# 4. Verificar ANTES de ir al panel: tiene que empezar con $argon2id$.
+docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml exec -T postgres \
+  psql -U maildte -d maildte_real -c \
+  "SELECT email, left(\"passwordHash\", 12) AS inicio FROM users WHERE email = '<el ADMIN elegido>';"
+# -> inicio | $argon2id$v=
 ```
+
+El paso 4 no es opcional. Es el que separa "la contraseña estaba mal" de "el
+hash nunca llegó entero", y sin él los dos se ven igual desde el navegador.
 
 #### 5. Levantar la API y el panel contra la copia
 
