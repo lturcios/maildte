@@ -31,6 +31,7 @@ import { PurchaseActivitySeedService } from './activity/purchase-activity-seed.s
 import { ListPurchaseActivitiesDto } from './dto/list-purchase-activities.dto';
 import { CreatePurchaseActivityDto } from './dto/create-purchase-activity.dto';
 import { UpdatePurchaseActivityDto } from './dto/update-purchase-activity.dto';
+import { UpdateDocumentActivityDto } from './dto/update-document-activity.dto';
 import {
   ClearSupplierActivityDefaultDto,
   ListSupplierActivityDefaultsDto,
@@ -126,6 +127,23 @@ export class PurchaseBookController {
     @CurrentTenant() ctx: TenantContext,
   ) {
     const data = await this.purchaseBook.updateClassification(ctx, id, dto);
+    return { data };
+  }
+
+  /**
+   * Override de la actividad de una compra. Ruta propia y no un campo más de
+   * `documents/:id/classification`: son dos decisiones contables distintas, con
+   * su propia traza de quién y cuándo, y mezclarlas haría que corregir la
+   * actividad sobrescribiera la firma de la clasificación.
+   */
+  @Patch('documents/:id/activity')
+  @Roles(Role.ADMIN)
+  async updateDocumentActivity(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateDocumentActivityDto,
+    @CurrentTenant() ctx: TenantContext,
+  ) {
+    const data = await this.purchaseBook.updateDocumentActivity(ctx, id, dto);
     return { data };
   }
 

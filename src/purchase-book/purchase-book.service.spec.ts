@@ -15,8 +15,13 @@ import { ListPurchaseDocumentsDto } from './dto/list-purchase-documents.dto';
 import { ReprocessDto } from './dto/reprocess.dto';
 import { PARSER_VERSION } from './parser/dte-parser';
 import { ANEXO_CLASSIFICATION_EPOCH } from './anexo/resolve-classification';
+import { UnprocessableEntityException } from '@nestjs/common';
 
 const TENANT_ID = '11111111-1111-1111-1111-111111111111';
+const RECEPTOR_ID = '22222222-2222-2222-2222-222222222222';
+const EMISOR_ID = '33333333-3333-3333-3333-333333333333';
+const ACTIVITY_ID = '44444444-4444-4444-4444-444444444444';
+const OTHER_ACTIVITY_ID = '55555555-5555-5555-5555-555555555555';
 
 const adminCtx: TenantContext = {
   tenantId: TENANT_ID,
@@ -165,6 +170,8 @@ const prismaMock = {
     aggregate: jest.fn(),
     update: jest.fn(),
   },
+  purchaseActivity: { findMany: jest.fn(), findFirst: jest.fn() },
+  supplierActivityDefault: { findMany: jest.fn() },
   dteParseResult: { findMany: jest.fn(), count: jest.fn() },
   attachment: { findMany: jest.fn(), count: jest.fn() },
   withTenant: jest.fn(callWithTenantMock),
@@ -188,7 +195,22 @@ describe('PurchaseBookService', () => {
     prismaMock.withTenant.mockImplementation(callWithTenantMock);
     prismaMock.purchaseDocument.findMany.mockResolvedValue([]);
     prismaMock.purchaseDocument.count.mockResolvedValue(0);
-    prismaMock.purchaseDocument.findFirst.mockResolvedValue({ id: 'doc-1', rawJson: { a: 1 } });
+    prismaMock.purchaseDocument.findFirst.mockResolvedValue({
+      id: 'doc-1',
+      rawJson: { a: 1 },
+      // La resolución de la actividad lee estas tres de toda fila: la
+      // proyección real siempre las trae, así que el mock también.
+      activityId: null,
+      emisorId: EMISOR_ID,
+      receptorId: RECEPTOR_ID,
+    });
+    prismaMock.purchaseActivity.findMany.mockResolvedValue([]);
+    prismaMock.purchaseActivity.findFirst.mockResolvedValue({
+      id: ACTIVITY_ID,
+      receptorId: RECEPTOR_ID,
+      active: true,
+    });
+    prismaMock.supplierActivityDefault.findMany.mockResolvedValue([]);
     prismaMock.purchaseDocument.update.mockResolvedValue({ id: 'doc-1' });
     prismaMock.attachment.findMany.mockResolvedValue([]);
     prismaMock.attachment.count.mockResolvedValue(0);
@@ -350,6 +372,163 @@ describe('PurchaseBookService', () => {
         service.updateClassification(adminCtx, 'ajeno', { anexoSector: 2 }),
       ).rejects.toThrow(NotFoundException);
       expect(prismaMock.purchaseDocument.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('filtro por actividad (Addendum 11, fase 3)', () => {
+    it('no es "where activityId = X": incluye a los heredados del proveedor', async () => {
+      prismaMock.supplierActivityDefault.findMany.mockResolvedValue([
+        { emisorId: EMISOR_ID },
+        { emisorId: 'emisor-2' },
+      ]);
+
+      await service.findAll(adminCtx, listDto({ activityId: ACTIVITY_ID }));
+
+      const and = prismaMock.purchaseDocument.findMany.mock.calls[0][0].where
+        .AND as Prisma.PurchaseDocumentWhereInput[];
+      expect(and[0]).toEqual({
+        OR: [
+          { activityId: ACTIVITY_ID },
+          { activityId: null, emisorId: { in: [EMISOR_ID, 'emisor-2'] } },
+        ],
+      });
+    });
+
+    it('sin proveedores mapeados se reduce al override, sin un IN vacío', async () => {
+      prismaMock.supplierActivityDefault.findMany.mockResolvedValue([]);
+
+      await service.findAll(adminCtx, listDto({ activityId: ACTIVITY_ID }));
+
+      const and = prismaMock.purchaseDocument.findMany.mock.calls[0][0].where
+        .AND as Prisma.PurchaseDocumentWhereInput[];
+      expect(and[0]).toEqual({ activityId: ACTIVITY_ID });
+    });
+
+    it('"none" pide lo que no tiene override NI default: niega los proveedores mapeados', async () => {
+      prismaMock.supplierActivityDefault.findMany.mockResolvedValue([{ emisorId: EMISOR_ID }]);
+
+      await service.findAll(adminCtx, listDto({ activityId: 'none', receptorId: RECEPTOR_ID }));
+
+      const and = prismaMock.purchaseDocument.findMany.mock.calls[0][0].where
+        .AND as Prisma.PurchaseDocumentWhereInput[];
+      expect(and[0]).toEqual({ activityId: null, emisorId: { notIn: [EMISOR_ID] } });
+    });
+
+    it('"none" sin receptor es un error: el mapeo es por contribuyente', async () => {
+      await expect(service.findAll(adminCtx, listDto({ activityId: 'none' }))).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('una actividad de otro tenant devuelve 404 y no un listado sin filtrar', async () => {
+      prismaMock.purchaseActivity.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.findAll(adminCtx, listDto({ activityId: OTHER_ACTIVITY_ID })),
+      ).rejects.toThrow(NotFoundException);
+      expect(prismaMock.purchaseDocument.findMany).not.toHaveBeenCalled();
+    });
+
+    it('pedir el receptor A con una actividad de B es 404, no el listado de A entero', async () => {
+      prismaMock.purchaseActivity.findFirst.mockResolvedValue({
+        id: ACTIVITY_ID,
+        receptorId: 'otro-receptor',
+      });
+
+      await expect(
+        service.findAll(adminCtx, listDto({ activityId: ACTIVITY_ID, receptorId: RECEPTOR_ID })),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('el resumen aplica el mismo filtro que el listado', async () => {
+      prismaMock.supplierActivityDefault.findMany.mockResolvedValue([{ emisorId: EMISOR_ID }]);
+
+      await service.summary(adminCtx, listDto({ activityId: ACTIVITY_ID }));
+
+      const and = prismaMock.purchaseDocument.aggregate.mock.calls[0][0].where
+        .AND as Prisma.PurchaseDocumentWhereInput[];
+      expect(and[0]).toMatchObject({ OR: expect.any(Array) });
+    });
+
+    it('el filtro por actividad no pisa el AND de la clasificación', async () => {
+      prismaMock.supplierActivityDefault.findMany.mockResolvedValue([]);
+
+      await service.findAll(
+        adminCtx,
+        listDto({ activityId: ACTIVITY_ID, classification: 'unclassified' }),
+      );
+
+      const and = prismaMock.purchaseDocument.findMany.mock.calls[0][0].where
+        .AND as Prisma.PurchaseDocumentWhereInput[];
+      // Las dos condiciones de la clasificación más la de actividad.
+      expect(and).toHaveLength(3);
+      expect(and[2]).toEqual({ activityId: ACTIVITY_ID });
+    });
+  });
+
+  describe('updateDocumentActivity', () => {
+    it('asigna el override y registra quién y cuándo', async () => {
+      await service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: ACTIVITY_ID });
+
+      const data = prismaMock.purchaseDocument.update.mock.calls[0][0].data;
+      expect(data.activityId).toBe(ACTIVITY_ID);
+      expect(data.activityAssignedById).toBe(adminCtx.actor.id);
+      expect(data.activityAssignedAt).toBeInstanceOf(Date);
+    });
+
+    it('no toca classifiedById: la actividad y Q–T son decisiones distintas', async () => {
+      await service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: ACTIVITY_ID });
+
+      const data = prismaMock.purchaseDocument.update.mock.calls[0][0].data;
+      expect(data).not.toHaveProperty('classifiedById');
+      expect(data).not.toHaveProperty('classifiedAt');
+    });
+
+    it('null limpia el override pero conserva la traza de quién lo decidió', async () => {
+      await service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: null });
+
+      const data = prismaMock.purchaseDocument.update.mock.calls[0][0].data;
+      expect(data.activityId).toBeNull();
+      expect(data.activityAssignedById).toBe(adminCtx.actor.id);
+    });
+
+    it('rechaza la actividad de OTRO contribuyente', async () => {
+      prismaMock.purchaseActivity.findFirst.mockResolvedValue({
+        id: ACTIVITY_ID,
+        receptorId: 'otro-receptor',
+        active: true,
+      });
+
+      await expect(
+        service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: ACTIVITY_ID }),
+      ).rejects.toThrow(UnprocessableEntityException);
+      expect(prismaMock.purchaseDocument.update).not.toHaveBeenCalled();
+    });
+
+    it('rechaza una actividad desactivada', async () => {
+      prismaMock.purchaseActivity.findFirst.mockResolvedValue({
+        id: ACTIVITY_ID,
+        receptorId: RECEPTOR_ID,
+        active: false,
+      });
+
+      await expect(
+        service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: ACTIVITY_ID }),
+      ).rejects.toThrow(UnprocessableEntityException);
+    });
+
+    it('un documento de otro tenant devuelve 404 antes de mirar la actividad', async () => {
+      prismaMock.purchaseDocument.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.updateDocumentActivity(adminCtx, 'ajeno', { activityId: ACTIVITY_ID }),
+      ).rejects.toThrow(NotFoundException);
+      expect(prismaMock.purchaseActivity.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('limpiar el override no consulta el catálogo: no hay actividad que validar', async () => {
+      await service.updateDocumentActivity(adminCtx, 'doc-1', { activityId: null });
+      expect(prismaMock.purchaseActivity.findFirst).not.toHaveBeenCalled();
     });
   });
 

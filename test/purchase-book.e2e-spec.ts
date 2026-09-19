@@ -925,6 +925,222 @@ describe('Libro de compras (e2e)', () => {
     });
   });
 
+  /**
+   * Addendum 11, fase 3 rebanada 2: la actividad EFECTIVA.
+   *
+   * Catálogo y mapeo propios, y no los de la rebanada anterior: aquel describe
+   * termina desactivando su actividad, y un test que dependa de ese estado se
+   * rompe en cuanto alguien reordene los casos de arriba.
+   */
+  describe('actividad efectiva del documento (Addendum 11, fase 3)', () => {
+    const asAdminA = (method: 'get' | 'post' | 'patch' | 'put', path: string) =>
+      request(app.getHttpServer())
+        [method](`/api/v1${path}`)
+        .set('Authorization', `Bearer ${adminTokenA}`);
+
+    /** Actividad del receptor del DTE v4, mapeada a su proveedor. */
+    let restauranteId: string;
+    /** Segunda actividad del MISMO receptor, sin ningún proveedor mapeado. */
+    let cateringId: string;
+
+    beforeAll(async () => {
+      const crear = async (nombre: string): Promise<string> => {
+        const res = await asAdminA('post', '/purchase-book/activities').send({
+          receptorId: receptorV4Id,
+          nombre,
+        });
+        expect(res.status).toBe(201);
+        return res.body.data.id;
+      };
+      restauranteId = await crear('Restaurante (rebanada 2)');
+      cateringId = await crear('Catering (rebanada 2)');
+
+      const mapeo = await asAdminA('put', '/purchase-book/supplier-activity-defaults').send({
+        receptorId: receptorV4Id,
+        emisorId: emisorV4Id,
+        activityId: restauranteId,
+      });
+      expect(mapeo.status).toBe(200);
+    });
+
+    describe('resolución', () => {
+      it('sin override, la compra hereda la actividad del proveedor', async () => {
+        const res = await get(`/purchase-book/documents/${docV4Id}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.resolvedActivity).toMatchObject({
+          activityId: restauranteId,
+          source: 'supplier-default',
+          activity: { nombre: 'Restaurante (rebanada 2)' },
+        });
+      });
+
+      it('el override del documento gana sobre el default del proveedor', async () => {
+        const res = await patchAsAdmin(`/purchase-book/documents/${docV4Id}/activity`).send({
+          activityId: cateringId,
+        });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.resolvedActivity).toMatchObject({
+          activityId: cateringId,
+          source: 'override',
+        });
+        expect(res.body.data.activityAssignedById).not.toBeNull();
+        expect(res.body.data.activityAssignedAt).not.toBeNull();
+      });
+
+      it('la actividad no toca la firma de la clasificación Q–T', async () => {
+        // Son dos decisiones contables distintas: corregir la actividad no
+        // puede hacer parecer que alguien reclasificó el documento.
+        const antes = await get(`/purchase-book/documents/${docV4Id}`);
+        await patchAsAdmin(`/purchase-book/documents/${docV4Id}/activity`).send({
+          activityId: restauranteId,
+        });
+        const despues = await get(`/purchase-book/documents/${docV4Id}`);
+
+        expect(despues.body.data.classifiedAt).toEqual(antes.body.data.classifiedAt);
+        expect(despues.body.data.classifiedById).toEqual(antes.body.data.classifiedById);
+      });
+
+      it('un null explícito quita el override y devuelve la compra al default del proveedor', async () => {
+        const res = await patchAsAdmin(`/purchase-book/documents/${docV4Id}/activity`).send({
+          activityId: null,
+        });
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.activityId).toBeNull();
+        expect(res.body.data.resolvedActivity).toMatchObject({
+          activityId: restauranteId,
+          source: 'supplier-default',
+        });
+        // La traza sobrevive: "alguien decidió que esto NO lleva override" es
+        // una decisión, no la ausencia de una.
+        expect(res.body.data.activityAssignedById).not.toBeNull();
+      });
+
+      it('el listado también trae la actividad resuelta de cada fila', async () => {
+        const res = await get(`/purchase-book/documents?receptorId=${receptorV4Id}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.data[0].resolvedActivity).toMatchObject({ source: 'supplier-default' });
+      });
+
+      it('una compra de un proveedor sin mapear queda sin actividad', async () => {
+        const res = await get(`/purchase-book/documents/${docV3Id}`);
+
+        expect(res.body.data.resolvedActivity).toMatchObject({
+          activityId: null,
+          source: 'missing',
+          activity: null,
+        });
+      });
+    });
+
+    describe('filtro', () => {
+      it('trae los heredados del proveedor, no solo los que tienen override', async () => {
+        // El documento v4 NO tiene override en este punto: si el filtro fuera
+        // `where activityId = X`, este listado vendría vacío.
+        const res = await get(
+          `/purchase-book/documents?receptorId=${receptorV4Id}&activityId=${restauranteId}`,
+        );
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.map((d: { id: string }) => d.id)).toContain(docV4Id);
+      });
+
+      it('una actividad sin compras devuelve vacío, no todo el contribuyente', async () => {
+        const res = await get(
+          `/purchase-book/documents?receptorId=${receptorV4Id}&activityId=${cateringId}`,
+        );
+
+        expect(res.status).toBe(200);
+        expect(res.body.data).toEqual([]);
+        expect(res.body.meta.total).toBe(0);
+      });
+
+      it('none trae las compras sin actividad resuelta', async () => {
+        const res = await get(
+          `/purchase-book/documents?receptorId=${receptorV3Id}&activityId=none`,
+        );
+
+        expect(res.status).toBe(200);
+        expect(res.body.data.map((d: { id: string }) => d.id)).toContain(docV3Id);
+      });
+
+      it('none sin receptor es 404: el mapeo de proveedores es por contribuyente', async () => {
+        const res = await get('/purchase-book/documents?activityId=none');
+        expect(res.status).toBe(404);
+      });
+
+      it('un activityId que no es UUID ni none es 400', async () => {
+        const res = await get('/purchase-book/documents?activityId=cualquiera');
+        expect(res.status).toBe(400);
+      });
+
+      it('el resumen suma exactamente lo que el listado filtrado muestra', async () => {
+        const listado = await get(
+          `/purchase-book/documents?receptorId=${receptorV4Id}&activityId=${restauranteId}`,
+        );
+        const resumen = await get(
+          `/purchase-book/documents/summary?receptorId=${receptorV4Id}&activityId=${restauranteId}`,
+        );
+
+        expect(resumen.status).toBe(200);
+        expect(resumen.body.data.documentCount).toBe(listado.body.meta.total);
+      });
+
+      it('el filtro por actividad convive con el de clasificación', async () => {
+        const res = await get(
+          `/purchase-book/documents?receptorId=${receptorV4Id}&activityId=${restauranteId}&classification=all`,
+        );
+        expect(res.status).toBe(200);
+      });
+    });
+
+    describe('permisos y aislamiento', () => {
+      it('un MIEMBRO no asigna la actividad: es criterio contable', async () => {
+        const res = await request(app.getHttpServer())
+          .patch(`/api/v1/purchase-book/documents/${docV4Id}/activity`)
+          .set('Authorization', `Bearer ${miembroTokenA}`)
+          .send({ activityId: restauranteId });
+
+        expect(res.status).toBe(403);
+      });
+
+      it('rechaza la actividad de OTRO contribuyente con 422', async () => {
+        // `docV3Id` es de otro receptor: asignarle una actividad del receptor
+        // del v4 aplicaría el criterio de una empresa a las compras de otra.
+        const res = await patchAsAdmin(`/purchase-book/documents/${docV3Id}/activity`).send({
+          activityId: restauranteId,
+        });
+
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe('PURCHASE_ACTIVITY_RECEPTOR_MISMATCH');
+      });
+
+      it('el tenant B no asigna la actividad de un documento del tenant A', async () => {
+        const res = await request(app.getHttpServer())
+          .patch(`/api/v1/purchase-book/documents/${docV4Id}/activity`)
+          .set('Authorization', `Bearer ${adminTokenB}`)
+          .send({ activityId: restauranteId });
+
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('PURCHASE_DOCUMENT_NOT_FOUND');
+      });
+
+      it('el tenant B no filtra por una actividad del tenant A', async () => {
+        const res = await get(`/purchase-book/documents?activityId=${restauranteId}`, apiKeyB);
+
+        expect(res.status).toBe(404);
+      });
+
+      it('un body sin activityId es 400: omitirlo no es "no tocar la actividad"', async () => {
+        const res = await patchAsAdmin(`/purchase-book/documents/${docV4Id}/activity`).send({});
+        expect(res.status).toBe(400);
+      });
+    });
+  });
+
   describe('catálogos de Hacienda', () => {
     it('expone las cuatro columnas del anexo con sus etiquetas', async () => {
       const res = await get('/purchase-book/catalogs');
