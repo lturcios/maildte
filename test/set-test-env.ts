@@ -2,13 +2,12 @@ import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+import { APP_TEST_URL, REDIS_TEST_URL, TEST_URL } from './e2e-connection';
+
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_URL = 'postgresql://maildte:secret@localhost:5433/maildte_test';
-// Rol restringido (no superusuario): sin esto, RLS queda bypaseado y los tests de
-// aislamiento no prueban nada real (ver comentario en la migración multi_tenancy).
-process.env.APP_DATABASE_URL =
-  'postgresql://maildte_app:maildte_app_dev_only@localhost:5433/maildte_test';
-process.env.REDIS_URL = 'redis://localhost:6379/1'; // DB 1: aislada de los datos de desarrollo (DB 0)
+process.env.DATABASE_URL = TEST_URL;
+process.env.APP_DATABASE_URL = APP_TEST_URL;
+process.env.REDIS_URL = REDIS_TEST_URL;
 process.env.ENCRYPTION_KEY = 'a'.repeat(64);
 process.env.JWT_SECRET = 'e2e-test-jwt-secret-0123456789abcdef0123456789';
 process.env.JWT_REFRESH_SECRET = 'e2e-test-jwt-refresh-secret-0123456789abcdef01';

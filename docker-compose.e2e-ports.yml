@@ -1,0 +1,30 @@
+# Override de puertos para correr la suite e2e cuando 5433 o 6379 ya están
+# tomados en la máquina (es habitual: son los puertos "de proyecto" de cualquier
+# stack Postgres+Redis local).
+#
+# NO se llama `docker-compose.override.yml` a propósito: ese nombre lo carga
+# `docker compose` solo, y cambiaría los puertos de todo el equipo sin que nadie
+# lo pida. Este hay que pasarlo explícito:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.e2e-ports.yml up -d
+#
+# y apuntar la suite a esos puertos con las variables que lee
+# `test/e2e-connection.ts`:
+#
+#   E2E_POSTGRES_PORT=5434 E2E_REDIS_PORT=6380 pnpm test:e2e
+#
+# `!override` es obligatorio: al fusionar dos archivos, Compose CONCATENA las
+# listas de `ports` en vez de reemplazarlas, así que sin la etiqueta cada
+# servicio quedaría publicado en los dos puertos y el `up` volvería a morir con
+# "port is already allocated" por el puerto viejo. Requiere Compose >= 2.24.
+#
+# Mismos servicios, mismos volúmenes y mismo nombre de proyecto que el compose
+# base: lo único que cambia es a qué puerto del host se publica cada uno.
+services:
+  postgres:
+    ports: !override
+      - '5434:5432'
+
+  redis:
+    ports: !override
+      - '6380:6379'
