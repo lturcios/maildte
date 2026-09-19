@@ -59,6 +59,51 @@ describe('Auth (e2e)', () => {
       expect(res.status).toBe(401);
       expect(res.body.error).toBe('INVALID_CREDENTIALS');
     });
+
+    /**
+     * Una fila con el `passwordHash` dañado —un restore parcial, una migración
+     * a medias, un `UPDATE` con el hash mal escapado— NO puede devolver un 500
+     * en el endpoint público de login. `argon2.verify()` lanza cuando el hash
+     * no es una cadena PHC válida, y esa excepción llegaba sin capturar.
+     */
+    it('hash almacenado ilegible -> 401, nunca 500', async () => {
+      const tenant = await seedTenant(seedPrisma);
+      const admin = await seedUser(seedPrisma, tenant.id, 'ADMIN');
+      await seedPrisma.user.update({
+        where: { id: admin.id },
+        // Exactamente lo que deja un hash argon2 pegado entre comillas dobles
+        // en un shell: el `$` inicia una expansión y se come lo que sigue.
+        data: { passwordHash: '=19=65536,t=3,p=4/usr/bin/bash123456789ABCDEF' },
+      });
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: admin.email, password: admin.password });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toBe('INVALID_CREDENTIALS');
+    });
+
+    it('un usuario con el hash dañado no delata su existencia frente a uno inexistente', async () => {
+      const tenant = await seedTenant(seedPrisma);
+      const admin = await seedUser(seedPrisma, tenant.id, 'ADMIN');
+      await seedPrisma.user.update({
+        where: { id: admin.id },
+        data: { passwordHash: 'no-es-un-hash' },
+      });
+
+      const roto = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: admin.email, password: admin.password });
+      const inexistente = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: 'tampoco-existe@test.local', password: admin.password });
+
+      // Misma respuesta: un 500 acá señalaría "esta cuenta existe y además
+      // está rota", que es justo lo que un 401 no dice.
+      expect(roto.status).toBe(inexistente.status);
+      expect(roto.body.error).toBe(inexistente.body.error);
+    });
   });
 
   describe('POST /auth/refresh', () => {

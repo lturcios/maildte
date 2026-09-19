@@ -4,3 +4,9 @@ dist/
 *.tmp
 coverage/
 .atl/
+
+# Dumps y copias de base (RUNBOOK 9.g). Son la contabilidad de un
+# contribuyente real: no entran al repositorio ni por accidente.
+*.sql
+*.sql.gz
+!prisma/migrations/**/*.sql
